@@ -243,6 +243,12 @@ func cleantempnopop(mark *NodeList, order *Order, out **NodeList) {
 	var kill *Node
 
 	for l := order.temp; l != mark; l = l.Next {
+		if l.N.Name.Keepalive {
+			l.N.Name.Keepalive = false
+			kill = Nod(OVARLIVE, l.N, nil)
+			typecheck(&kill, Etop)
+			*out = list(*out, kill)
+		}
 		kill = Nod(OVARKILL, l.N, nil)
 		typecheck(&kill, Etop)
 		*out = list(*out, kill)
@@ -375,6 +381,28 @@ func ordercall(n *Node, order *Order) {
 	orderexpr(&n.Left, order, nil)
 	orderexpr(&n.Right, order, nil) // ODDDARG temp
 	ordercallargs(&n.List, order)
+
+	if n.Op == OCALLFUNC {
+		for l, t := n.List, getinargx(n.Left.Type).Type; l != nil && t != nil; l, t = l.Next, t.Down {
+			// Check for "unsafe-uintptr" tag provided by escape analysis.
+			// If present and the argument is really a pointer being converted
+			// to uintptr, arrange for the pointer to be kept alive until the call
+			// returns, by copying it into a temp and marking that temp
+			// still alive when we pop the temp stack.
+			if t.Note != nil && *t.Note == unsafeUintptrTag {
+				xp := &l.N
+				for (*xp).Op == OCONVNOP && !Isptr[(*xp).Type.Etype] {
+					xp = &(*xp).Left
+				}
+				x := *xp
+				if Isptr[x.Type.Etype] {
+					x = ordercopyexpr(x, x.Type, order, 0)
+					x.Name.Keepalive = true
+					*xp = x
+				}
+			}
+		}
+	}
 }
 
 // Ordermapassign appends n to order->out, introducing temporaries
@@ -464,7 +492,7 @@ func orderstmt(n *Node, order *Order) {
 	default:
 		Fatalf("orderstmt %v", Oconv(int(n.Op), 0))
 
-	case OVARKILL:
+	case OVARKILL, OVARLIVE:
 		order.out = list(order.out, n)
 
 	case OAS:
@@ -796,14 +824,14 @@ func orderstmt(n *Node, order *Order) {
 				// Delete the ODCL nodes here and recreate them inside the body below.
 				case OSELRECV, OSELRECV2:
 					if r.Colas {
-						t = r.Ninit
-						if t != nil && t.N.Op == ODCL && t.N.Left == r.Left {
-							t = t.Next
+						init := r.Ninit
+						if init != nil && init.N.Op == ODCL && init.N.Left == r.Left {
+							init = init.Next
 						}
-						if t != nil && t.N.Op == ODCL && r.List != nil && t.N.Left == r.List.N {
-							t = t.Next
+						if init != nil && init.N.Op == ODCL && r.List != nil && init.N.Left == r.List.N {
+							init = init.Next
 						}
-						if t == nil {
+						if init == nil {
 							r.Ninit = nil
 						}
 					}
@@ -1092,7 +1120,10 @@ func orderexpr(np **Node, order *Order, lhs *Node) {
 		OMAKESLICE,
 		ONEW,
 		OREAL,
-		ORECOVER:
+		ORECOVER,
+		OSTRARRAYBYTE,
+		OSTRARRAYBYTETMP,
+		OSTRARRAYRUNE:
 		ordercall(n, order)
 		if lhs == nil || lhs.Op != ONAME || instrumenting {
 			n = ordercopyexpr(n, n.Type, order, 0)

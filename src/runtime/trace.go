@@ -14,6 +14,7 @@ package runtime
 
 import (
 	"runtime/internal/atomic"
+	"runtime/internal/sys"
 	"unsafe"
 )
 
@@ -69,7 +70,7 @@ const (
 	// and ppc64le.
 	// Tracing won't work reliably for architectures where cputicks is emulated
 	// by nanotime, so the value doesn't matter for those architectures.
-	traceTickDiv = 16 + 48*(goarch_386|goarch_amd64|goarch_amd64p32)
+	traceTickDiv = 16 + 48*(sys.Goarch386|sys.GoarchAmd64|sys.GoarchAmd64p32)
 	// Maximum number of PCs in a single stack trace.
 	// Since events contain only stack id rather than whole stack trace,
 	// we can allow quite large values here.
@@ -528,7 +529,12 @@ func traceEvent(ev byte, skip int, args ...uint64) {
 			nstk = callers(skip, buf.stk[:])
 		} else if gp != nil {
 			gp = mp.curg
-			nstk = gcallers(gp, skip, buf.stk[:])
+			// This may happen when tracing a system call,
+			// so we must lock the stack.
+			if gcTryLockStackBarriers(gp) {
+				nstk = gcallers(gp, skip, buf.stk[:])
+				gcUnlockStackBarriers(gp)
+			}
 		}
 		if nstk > 0 {
 			nstk-- // skip runtime.goexit
@@ -704,7 +710,7 @@ Search:
 
 // newStack allocates a new stack of size n.
 func (tab *traceStackTable) newStack(n int) *traceStack {
-	return (*traceStack)(tab.mem.alloc(unsafe.Sizeof(traceStack{}) + uintptr(n)*ptrSize))
+	return (*traceStack)(tab.mem.alloc(unsafe.Sizeof(traceStack{}) + uintptr(n)*sys.PtrSize))
 }
 
 // dump writes all previously cached stacks to trace buffers,
@@ -744,41 +750,50 @@ func (tab *traceStackTable) dump() {
 // traceAlloc is a non-thread-safe region allocator.
 // It holds a linked list of traceAllocBlock.
 type traceAlloc struct {
-	head *traceAllocBlock
+	head traceAllocBlockPtr
 	off  uintptr
 }
 
 // traceAllocBlock is a block in traceAlloc.
+//
+// traceAllocBlock is allocated from non-GC'd memory, so it must not
+// contain heap pointers. Writes to pointers to traceAllocBlocks do
+// not need write barriers.
 type traceAllocBlock struct {
-	next *traceAllocBlock
-	data [64<<10 - ptrSize]byte
+	next traceAllocBlockPtr
+	data [64<<10 - sys.PtrSize]byte
 }
+
+type traceAllocBlockPtr uintptr
+
+func (p traceAllocBlockPtr) ptr() *traceAllocBlock   { return (*traceAllocBlock)(unsafe.Pointer(p)) }
+func (p *traceAllocBlockPtr) set(x *traceAllocBlock) { *p = traceAllocBlockPtr(unsafe.Pointer(x)) }
 
 // alloc allocates n-byte block.
 func (a *traceAlloc) alloc(n uintptr) unsafe.Pointer {
-	n = round(n, ptrSize)
-	if a.head == nil || a.off+n > uintptr(len(a.head.data)) {
-		if n > uintptr(len(a.head.data)) {
+	n = round(n, sys.PtrSize)
+	if a.head == 0 || a.off+n > uintptr(len(a.head.ptr().data)) {
+		if n > uintptr(len(a.head.ptr().data)) {
 			throw("trace: alloc too large")
 		}
 		block := (*traceAllocBlock)(sysAlloc(unsafe.Sizeof(traceAllocBlock{}), &memstats.other_sys))
 		if block == nil {
 			throw("trace: out of memory")
 		}
-		block.next = a.head
-		a.head = block
+		block.next.set(a.head.ptr())
+		a.head.set(block)
 		a.off = 0
 	}
-	p := &a.head.data[a.off]
+	p := &a.head.ptr().data[a.off]
 	a.off += n
 	return unsafe.Pointer(p)
 }
 
 // drop frees all previously allocated memory and resets the allocator.
 func (a *traceAlloc) drop() {
-	for a.head != nil {
-		block := a.head
-		a.head = block.next
+	for a.head != 0 {
+		block := a.head.ptr()
+		a.head.set(block.next.ptr())
 		sysFree(unsafe.Pointer(block), unsafe.Sizeof(traceAllocBlock{}), &memstats.other_sys)
 	}
 }

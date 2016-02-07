@@ -63,7 +63,8 @@ and test commands:
 	-n
 		print the commands but do not run them.
 	-p n
-		the number of builds that can be run in parallel.
+		the number of programs, such as build commands or
+		test binaries, that can be run in parallel.
 		The default is the number of CPUs available, except
 		on darwin/arm which defaults to 1.
 	-race
@@ -71,7 +72,8 @@ and test commands:
 		Supported only on linux/amd64, freebsd/amd64, darwin/amd64 and windows/amd64.
 	-msan
 		enable interoperation with memory sanitizer.
-		Supported only on linux/amd64.
+		Supported only on linux/amd64,
+		and only with Clang/LLVM as the host C compiler.
 	-v
 		print the names of packages as they are compiled.
 	-work
@@ -332,9 +334,6 @@ func buildModeInit() {
 	_, gccgo := buildToolchain.(gccgoToolchain)
 	var codegenArg string
 	platform := goos + "/" + goarch
-	if buildBuildmode != "default" {
-		buildAsmflags = append(buildAsmflags, "-D=GOBUILDMODE_"+strings.Replace(buildBuildmode, "-", "_", -1)+"=1")
-	}
 	switch buildBuildmode {
 	case "archive":
 		pkgsFilter = pkgsNotMain
@@ -353,10 +352,10 @@ func buildModeInit() {
 			codegenArg = "-fPIC"
 		} else {
 			switch platform {
-			case "linux/amd64", "linux/arm", "linux/arm64",
-				"android/amd64", "android/arm":
+			case "linux/amd64", "linux/arm", "linux/arm64", "linux/386",
+				"android/amd64", "android/arm", "android/arm64", "android/386":
 				codegenArg = "-shared"
-			case "darwin/amd64":
+			case "darwin/amd64", "darwin/386":
 			default:
 				fatalf("-buildmode=c-shared not supported on %s\n", platform)
 			}
@@ -364,7 +363,7 @@ func buildModeInit() {
 		ldBuildmode = "c-shared"
 	case "default":
 		switch platform {
-		case "android/arm", "android/amd64":
+		case "android/arm", "android/arm64", "android/amd64", "android/386":
 			codegenArg = "-shared"
 			ldBuildmode = "pie"
 		default:
@@ -378,7 +377,8 @@ func buildModeInit() {
 			fatalf("-buildmode=pie not supported by gccgo")
 		} else {
 			switch platform {
-			case "linux/arm", "android/arm", "linux/amd64", "android/amd64", "linux/ppc64le":
+			case "linux/386", "linux/amd64", "linux/arm", "linux/arm64", "linux/ppc64le",
+				"android/amd64", "android/arm", "android/arm64", "android/386":
 				codegenArg = "-shared"
 			default:
 				fatalf("-buildmode=pie not supported on %s\n", platform)
@@ -391,7 +391,7 @@ func buildModeInit() {
 			codegenArg = "-fPIC"
 		} else {
 			switch platform {
-			case "linux/386", "linux/amd64", "linux/arm", "linux/arm64":
+			case "linux/386", "linux/amd64", "linux/arm", "linux/arm64", "linux/ppc64le":
 			default:
 				fatalf("-buildmode=shared not supported on %s\n", platform)
 			}
@@ -412,7 +412,7 @@ func buildModeInit() {
 			case "linux/386", "linux/amd64", "linux/arm", "linux/arm64", "linux/ppc64le":
 				buildAsmflags = append(buildAsmflags, "-D=GOBUILDMODE_shared=1")
 			default:
-				fatalf("-buildmode=shared not supported on %s\n", platform)
+				fatalf("-linkshared not supported on %s\n", platform)
 			}
 			codegenArg = "-dynlink"
 			// TODO(mwhudson): remove -w when that gets fixed in linker.
@@ -482,7 +482,12 @@ func runBuild(cmd *Command, args []string) {
 
 	var a *action
 	if buildBuildmode == "shared" {
-		a = b.libaction(libname(args), pkgsFilter(packages(args)), modeBuild, depMode)
+		pkgs := pkgsFilter(packages(args))
+		if libName, err := libname(args, pkgs); err != nil {
+			fatalf("%s", err.Error())
+		} else {
+			a = b.libaction(libName, pkgs, modeBuild, depMode)
+		}
 	} else {
 		a = &action{}
 		for _, p := range pkgsFilter(packages(args)) {
@@ -506,28 +511,65 @@ See also: go build, go get, go clean.
 	`,
 }
 
+// isMetaPackage checks if name is a reserved package name that expands to multiple packages
+func isMetaPackage(name string) bool {
+	return name == "std" || name == "cmd" || name == "all"
+}
+
 // libname returns the filename to use for the shared library when using
 // -buildmode=shared.  The rules we use are:
-//  1) Drop any trailing "/..."s if present
-//  2) Change / to -
-//  3) Join arguments with ,
-// So std -> libstd.so
-//    a b/... -> liba,b.so
-//    gopkg.in/tomb.v2 -> libgopkg.in-tomb.v2.so
-func libname(args []string) string {
+// Use arguments for special 'meta' packages:
+//	std --> libstd.so
+//	std cmd --> libstd,cmd.so
+// A single non-meta argument with trailing "/..." is special cased:
+//	foo/... --> libfoo.so
+//	(A relative path like "./..."  expands the "." first)
+// Use import paths for other cases, changing '/' to '-':
+//	somelib --> libsubdir-somelib.so
+//	./ or ../ --> libsubdir-somelib.so
+//	gopkg.in/tomb.v2 -> libgopkg.in-tomb.v2.so
+//	a/... b/... ---> liba/c,b/d.so - all matching import paths
+// Name parts are joined with ','.
+func libname(args []string, pkgs []*Package) (string, error) {
 	var libname string
-	for _, arg := range args {
-		arg = strings.TrimSuffix(arg, "/...")
-		arg = strings.Replace(arg, "/", "-", -1)
+	appendName := func(arg string) {
 		if libname == "" {
 			libname = arg
 		} else {
 			libname += "," + arg
 		}
 	}
+	var haveNonMeta bool
+	for _, arg := range args {
+		if isMetaPackage(arg) {
+			appendName(arg)
+		} else {
+			haveNonMeta = true
+		}
+	}
+	if len(libname) == 0 { // non-meta packages only. use import paths
+		if len(args) == 1 && strings.HasSuffix(args[0], "/...") {
+			// Special case of "foo/..." as mentioned above.
+			arg := strings.TrimSuffix(args[0], "/...")
+			if build.IsLocalImport(arg) {
+				cwd, _ := os.Getwd()
+				bp, _ := buildContext.ImportDir(filepath.Join(cwd, arg), build.FindOnly)
+				if bp.ImportPath != "" && bp.ImportPath != "." {
+					arg = bp.ImportPath
+				}
+			}
+			appendName(strings.Replace(arg, "/", "-", -1))
+		} else {
+			for _, pkg := range pkgs {
+				appendName(strings.Replace(pkg.ImportPath, "/", "-", -1))
+			}
+		}
+	} else if haveNonMeta { // have both meta package and a non-meta one
+		return "", errors.New("mixing of meta and non-meta packages is not allowed")
+	}
 	// TODO(mwhudson): Needs to change for platforms that use different naming
 	// conventions...
-	return "lib" + libname + ".so"
+	return "lib" + libname + ".so", nil
 }
 
 func runInstall(cmd *Command, args []string) {
@@ -560,7 +602,11 @@ func runInstall(cmd *Command, args []string) {
 	b.init()
 	var a *action
 	if buildBuildmode == "shared" {
-		a = b.libaction(libname(args), pkgs, modeInstall, modeInstall)
+		if libName, err := libname(args, pkgs); err != nil {
+			fatalf("%s", err.Error())
+		} else {
+			a = b.libaction(libName, pkgs, modeInstall, modeInstall)
+		}
 	} else {
 		a = &action{}
 		var tools []*action
@@ -777,7 +823,9 @@ func goFilesPackage(gofiles []string) *Package {
 	pkg := new(Package)
 	pkg.local = true
 	pkg.cmdline = true
+	stk.push("main")
 	pkg.load(&stk, bp, err)
+	stk.pop()
 	pkg.localPrefix = dirToImportPath(dir)
 	pkg.ImportPath = "command-line-arguments"
 	pkg.target = ""
@@ -954,13 +1002,22 @@ func (b *builder) action1(mode buildMode, depMode buildMode, p *Package, looksha
 
 		// Install header for cgo in c-archive and c-shared modes.
 		if p.usesCgo() && (buildBuildmode == "c-archive" || buildBuildmode == "c-shared") {
+			hdrTarget := a.target[:len(a.target)-len(filepath.Ext(a.target))] + ".h"
+			if buildContext.Compiler == "gccgo" {
+				// For the header file, remove the "lib"
+				// added by go/build, so we generate pkg.h
+				// rather than libpkg.h.
+				dir, file := filepath.Split(hdrTarget)
+				file = strings.TrimPrefix(file, "lib")
+				hdrTarget = filepath.Join(dir, file)
+			}
 			ah := &action{
 				p:      a.p,
 				deps:   []*action{a.deps[0]},
 				f:      (*builder).installHeader,
 				pkgdir: a.pkgdir,
 				objdir: a.objdir,
-				target: a.target[:len(a.target)-len(filepath.Ext(a.target))] + ".h",
+				target: hdrTarget,
 			}
 			a.deps = append(a.deps, ah)
 		}
@@ -1447,17 +1504,17 @@ func (b *builder) build(a *action) (err error) {
 		switch {
 		case strings.HasSuffix(name, _goos_goarch):
 			targ := file[:len(name)-len(_goos_goarch)] + "_GOOS_GOARCH." + ext
-			if err := b.copyFile(a, obj+targ, filepath.Join(a.p.Dir, file), 0644, true); err != nil {
+			if err := b.copyFile(a, obj+targ, filepath.Join(a.p.Dir, file), 0666, true); err != nil {
 				return err
 			}
 		case strings.HasSuffix(name, _goarch):
 			targ := file[:len(name)-len(_goarch)] + "_GOARCH." + ext
-			if err := b.copyFile(a, obj+targ, filepath.Join(a.p.Dir, file), 0644, true); err != nil {
+			if err := b.copyFile(a, obj+targ, filepath.Join(a.p.Dir, file), 0666, true); err != nil {
 				return err
 			}
 		case strings.HasSuffix(name, _goos):
 			targ := file[:len(name)-len(_goos)] + "_GOOS." + ext
-			if err := b.copyFile(a, obj+targ, filepath.Join(a.p.Dir, file), 0644, true); err != nil {
+			if err := b.copyFile(a, obj+targ, filepath.Join(a.p.Dir, file), 0666, true); err != nil {
 				return err
 			}
 		}
@@ -1546,7 +1603,7 @@ func (b *builder) getPkgConfigFlags(p *Package) (cflags, ldflags []string, err e
 
 func (b *builder) installShlibname(a *action) error {
 	a1 := a.deps[0]
-	err := ioutil.WriteFile(a.target, []byte(filepath.Base(a1.target)+"\n"), 0644)
+	err := ioutil.WriteFile(a.target, []byte(filepath.Base(a1.target)+"\n"), 0666)
 	if err != nil {
 		return err
 	}
@@ -1570,12 +1627,12 @@ func (b *builder) install(a *action) (err error) {
 		}
 	}()
 	a1 := a.deps[0]
-	perm := os.FileMode(0644)
+	perm := os.FileMode(0666)
 	if a1.link {
 		switch buildBuildmode {
 		case "c-archive", "c-shared":
 		default:
-			perm = 0755
+			perm = 0777
 		}
 	}
 
@@ -1649,7 +1706,25 @@ func (b *builder) moveOrCopyFile(a *action, dst, src string, perm os.FileMode, f
 
 	// If we can update the mode and rename to the dst, do it.
 	// Otherwise fall back to standard copy.
-	if err := os.Chmod(src, perm); err == nil {
+
+	// The perm argument is meant to be adjusted according to umask,
+	// but we don't know what the umask is.
+	// Create a dummy file to find out.
+	// This avoids build tags and works even on systems like Plan 9
+	// where the file mask computation incorporates other information.
+	mode := perm
+	f, err := os.OpenFile(filepath.Clean(dst)+"-go-tmp-umask", os.O_WRONLY|os.O_CREATE|os.O_EXCL, perm)
+	if err == nil {
+		fi, err := f.Stat()
+		if err == nil {
+			mode = fi.Mode() & 0777
+		}
+		name := f.Name()
+		f.Close()
+		os.Remove(name)
+	}
+
+	if err := os.Chmod(src, mode); err == nil {
 		if err := os.Rename(src, dst); err == nil {
 			if buildX {
 				b.showcmd("", "mv %s %s", src, dst)
@@ -1736,7 +1811,7 @@ func (b *builder) installHeader(a *action) error {
 		}
 	}
 
-	return b.moveOrCopyFile(a, a.target, src, 0644, true)
+	return b.moveOrCopyFile(a, a.target, src, 0666, true)
 }
 
 // cover runs, in effect,
@@ -1761,6 +1836,7 @@ var objectMagic = [][]byte{
 	{0x4d, 0x5a, 0x90, 0x00, 0x03, 0x00},      // PE (Windows) as generated by 6l/8l and gcc
 	{0x00, 0x00, 0x01, 0xEB},                  // Plan 9 i386
 	{0x00, 0x00, 0x8a, 0x97},                  // Plan 9 amd64
+	{0x00, 0x00, 0x06, 0x47},                  // Plan 9 arm
 }
 
 func isObject(s string) bool {
@@ -2264,33 +2340,26 @@ func (gcToolchain) pack(b *builder, p *Package, objDir, afile string, ofiles []s
 	for _, f := range ofiles {
 		absOfiles = append(absOfiles, mkAbs(objDir, f))
 	}
-	cmd := "c"
 	absAfile := mkAbs(objDir, afile)
-	appending := false
-	if _, err := os.Stat(absAfile); err == nil {
-		appending = true
-		cmd = "r"
+
+	// The archive file should have been created by the compiler.
+	// Since it used to not work that way, verify.
+	if _, err := os.Stat(absAfile); err != nil {
+		fatalf("os.Stat of archive file failed: %v", err)
 	}
 
-	cmdline := stringList("pack", cmd, absAfile, absOfiles)
-
-	if appending {
-		if buildN || buildX {
-			b.showcmd(p.Dir, "%s # internal", joinUnambiguously(cmdline))
-		}
-		if buildN {
-			return nil
-		}
-		if err := packInternal(b, absAfile, absOfiles); err != nil {
-			b.showOutput(p.Dir, p.ImportPath, err.Error()+"\n")
-			return errPrintedOutput
-		}
+	if buildN || buildX {
+		cmdline := stringList("pack", "r", absAfile, absOfiles)
+		b.showcmd(p.Dir, "%s # internal", joinUnambiguously(cmdline))
+	}
+	if buildN {
 		return nil
 	}
-
-	// Need actual pack.
-	cmdline[0] = tool("pack")
-	return b.run(p.Dir, p.ImportPath, nil, buildToolExec, cmdline)
+	if err := packInternal(b, absAfile, absOfiles); err != nil {
+		b.showOutput(p.Dir, p.ImportPath, err.Error()+"\n")
+		return errPrintedOutput
+	}
+	return nil
 }
 
 func packInternal(b *builder, afile string, ofiles []string) error {
@@ -2501,11 +2570,11 @@ func (tools gccgoToolchain) asm(b *builder, p *Package, obj, ofile, sfile string
 	sfile = mkAbs(p.Dir, sfile)
 	defs := []string{"-D", "GOOS_" + goos, "-D", "GOARCH_" + goarch}
 	if pkgpath := gccgoCleanPkgpath(p); pkgpath != "" {
-		defs = append(defs, `-D`, `GOPKGPATH="`+pkgpath+`"`)
+		defs = append(defs, `-D`, `GOPKGPATH=`+pkgpath)
 	}
 	defs = tools.maybePIC(defs)
 	defs = append(defs, b.gccArchArgs()...)
-	return b.run(p.Dir, p.ImportPath, nil, tools.compiler(), "-I", obj, "-o", ofile, defs, sfile)
+	return b.run(p.Dir, p.ImportPath, nil, tools.compiler(), "-xassembler-with-cpp", "-I", obj, "-c", "-o", ofile, defs, sfile)
 }
 
 func (gccgoToolchain) pkgpath(basedir string, p *Package) string {
@@ -2655,6 +2724,10 @@ func (tools gccgoToolchain) ld(b *builder, root *action, out string, allactions 
 		// libffi.
 		ldflags = append(ldflags, "-Wl,-r", "-nostdlib", "-Wl,--whole-archive", "-lgolibbegin", "-Wl,--no-whole-archive")
 
+		if b.gccSupportsNoPie() {
+			ldflags = append(ldflags, "-no-pie")
+		}
+
 		// We are creating an object file, so we don't want a build ID.
 		ldflags = b.disableBuildID(ldflags)
 
@@ -2662,7 +2735,7 @@ func (tools gccgoToolchain) ld(b *builder, root *action, out string, allactions 
 		out = out + ".o"
 
 	case "c-shared":
-		ldflags = append(ldflags, "-shared", "-nostdlib", "-Wl,--whole-archive", "-lgolibbegin", "-Wl,--no-whole-archive", "-lgo", "-lgcc_s", "-lgcc")
+		ldflags = append(ldflags, "-shared", "-nostdlib", "-Wl,--whole-archive", "-lgolibbegin", "-Wl,--no-whole-archive", "-lgo", "-lgcc_s", "-lgcc", "-lc", "-lgcc")
 
 	default:
 		fatalf("-buildmode=%s not supported for gccgo", ldBuildmode)
@@ -2760,43 +2833,6 @@ func gccgoCleanPkgpath(p *Package) string {
 	return strings.Map(clean, gccgoPkgpath(p))
 }
 
-// libgcc returns the filename for libgcc, as determined by invoking gcc with
-// the -print-libgcc-file-name option.
-func (b *builder) libgcc(p *Package) (string, error) {
-	var buf bytes.Buffer
-
-	gccCmd := b.gccCmd(p.Dir)
-
-	prev := b.print
-	if buildN {
-		// In -n mode we temporarily swap out the builder's
-		// print function to capture the command-line. This
-		// let's us assign it to $LIBGCC and produce a valid
-		// buildscript for cgo packages.
-		b.print = func(a ...interface{}) (int, error) {
-			return fmt.Fprint(&buf, a...)
-		}
-	}
-	f, err := b.runOut(p.Dir, p.ImportPath, nil, gccCmd, "-print-libgcc-file-name")
-	if err != nil {
-		return "", fmt.Errorf("gcc -print-libgcc-file-name: %v (%s)", err, f)
-	}
-	if buildN {
-		s := fmt.Sprintf("LIBGCC=$(%s)\n", buf.Next(buf.Len()-1))
-		b.print = prev
-		b.print(s)
-		return "$LIBGCC", nil
-	}
-
-	// The compiler might not be able to find libgcc, and in that case,
-	// it will simply return "libgcc.a", which is of no use to us.
-	if !filepath.IsAbs(string(f)) {
-		return "", nil
-	}
-
-	return strings.Trim(string(f), "\r\n"), nil
-}
-
 // gcc runs the gcc C compiler to create an object from a single C file.
 func (b *builder) gcc(p *Package, out string, flags []string, cfile string) error {
 	return b.ccompile(p, out, flags, cfile, b.gccCmd(p.Dir))
@@ -2883,6 +2919,36 @@ func (b *builder) ccompilerCmd(envvar, defcmd, objdir string) []string {
 	return a
 }
 
+// On systems with PIE (position independent executables) enabled by default,
+// -no-pie must be passed when doing a partial link with -Wl,-r. But -no-pie is
+// not supported by all compilers.
+func (b *builder) gccSupportsNoPie() bool {
+	if goos != "linux" {
+		// On some BSD platforms, error messages from the
+		// compiler make it to the console despite cmd.Std*
+		// all being nil. As -no-pie is only required on linux
+		// systems so far, we only test there.
+		return false
+	}
+	src := filepath.Join(b.work, "trivial.c")
+	if err := ioutil.WriteFile(src, []byte{}, 0666); err != nil {
+		return false
+	}
+	cmdArgs := b.gccCmd(b.work)
+	cmdArgs = append(cmdArgs, "-no-pie", "-c", "trivial.c")
+	if buildN || buildX {
+		b.showcmd(b.work, "%s", joinUnambiguously(cmdArgs))
+		if buildN {
+			return false
+		}
+	}
+	cmd := exec.Command(cmdArgs[0], cmdArgs[1:]...)
+	cmd.Dir = b.work
+	cmd.Env = envForDir(cmd.Dir, os.Environ())
+	out, err := cmd.CombinedOutput()
+	return err == nil && !bytes.Contains(out, []byte("unrecognized"))
+}
+
 // gccArchArgs returns arguments to pass to gcc based on the architecture.
 func (b *builder) gccArchArgs() []string {
 	switch goarch {
@@ -2921,12 +2987,6 @@ func (b *builder) cflags(p *Package, def bool) (cppflags, cflags, cxxflags, ldfl
 }
 
 var cgoRe = regexp.MustCompile(`[/\\:]`)
-
-var (
-	cgoLibGccFile     string
-	cgoLibGccErr      error
-	cgoLibGccFileOnce sync.Once
-)
 
 func (b *builder) cgo(p *Package, cgoExe, obj string, pcCFLAGS, pcLDFLAGS, cgofiles, gccfiles, gxxfiles, mfiles []string) (outGo, outObj []string, err error) {
 	cgoCPPFLAGS, cgoCFLAGS, cgoCXXFLAGS, cgoLDFLAGS := b.cflags(p, true)
@@ -3056,21 +3116,11 @@ func (b *builder) cgo(p *Package, cgoExe, obj string, pcCFLAGS, pcLDFLAGS, cgofi
 		}
 	}
 
-	cgoLibGccFileOnce.Do(func() {
-		cgoLibGccFile, cgoLibGccErr = b.libgcc(p)
-	})
-	if cgoLibGccFile == "" && cgoLibGccErr != nil {
-		return nil, nil, err
-	}
-
 	var staticLibs []string
 	if goos == "windows" {
-		// libmingw32 and libmingwex might also use libgcc, so libgcc must come last,
-		// and they also have some inter-dependencies, so must use linker groups.
+		// libmingw32 and libmingwex have some inter-dependencies,
+		// so must use linker groups.
 		staticLibs = []string{"-Wl,--start-group", "-lmingwex", "-lmingw32", "-Wl,--end-group"}
-	}
-	if cgoLibGccFile != "" {
-		staticLibs = append(staticLibs, cgoLibGccFile)
 	}
 
 	cflags := stringList(cgoCPPFLAGS, cgoCFLAGS)
@@ -3154,6 +3204,10 @@ func (b *builder) cgo(p *Package, cgoExe, obj string, pcCFLAGS, pcLDFLAGS, cgofi
 		}
 	}
 	ldflags := stringList(bareLDFLAGS, "-Wl,-r", "-nostdlib", staticLibs)
+
+	if b.gccSupportsNoPie() {
+		ldflags = append(ldflags, "-no-pie")
+	}
 
 	// We are creating an object file, so we don't want a build ID.
 	ldflags = b.disableBuildID(ldflags)
@@ -3289,7 +3343,7 @@ func (b *builder) swigIntSize(obj string) (intsize string, err error) {
 		return "$INTBITS", nil
 	}
 	src := filepath.Join(b.work, "swig_intsize.go")
-	if err = ioutil.WriteFile(src, []byte(swigIntSizeCode), 0644); err != nil {
+	if err = ioutil.WriteFile(src, []byte(swigIntSizeCode), 0666); err != nil {
 		return
 	}
 	srcs := []string{src}

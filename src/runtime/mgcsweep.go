@@ -8,6 +8,7 @@ package runtime
 
 import (
 	"runtime/internal/atomic"
+	"runtime/internal/sys"
 	"unsafe"
 )
 
@@ -94,6 +95,9 @@ func sweepone() uintptr {
 		if idx >= uint32(len(work.spans)) {
 			mheap_.sweepdone = 1
 			_g_.m.locks--
+			if debug.gcpacertrace > 0 && idx == uint32(len(work.spans)) {
+				print("pacer: sweep done at heap size ", memstats.heap_live>>20, "MB; allocated ", mheap_.spanBytesAlloc>>20, "MB of spans; swept ", mheap_.pagesSwept, " pages\n")
+			}
 			return ^uintptr(0)
 		}
 		s := work.spans[idx]
@@ -280,10 +284,10 @@ func (s *mspan) sweep(preserve bool) bool {
 			freeToHeap = true
 		} else {
 			// Free small object.
-			if size > 2*ptrSize {
-				*(*uintptr)(unsafe.Pointer(p + ptrSize)) = uintptrMask & 0xdeaddeaddeaddead // mark as "needs to be zeroed"
-			} else if size > ptrSize {
-				*(*uintptr)(unsafe.Pointer(p + ptrSize)) = 0
+			if size > 2*sys.PtrSize {
+				*(*uintptr)(unsafe.Pointer(p + sys.PtrSize)) = uintptrMask & 0xdeaddeaddeaddead // mark as "needs to be zeroed"
+			} else if size > sys.PtrSize {
+				*(*uintptr)(unsafe.Pointer(p + sys.PtrSize)) = 0
 			}
 			if head.ptr() == nil {
 				head = gclinkptr(p)
@@ -392,7 +396,9 @@ func reimburseSweepCredit(unusableBytes uintptr) {
 		// Nobody cares about the credit. Avoid the atomic.
 		return
 	}
-	atomic.Xadd64(&mheap_.spanBytesAlloc, -int64(unusableBytes))
+	if int64(atomic.Xadd64(&mheap_.spanBytesAlloc, -int64(unusableBytes))) < 0 {
+		throw("spanBytesAlloc underflow")
+	}
 }
 
 func dumpFreeList(s *mspan) {

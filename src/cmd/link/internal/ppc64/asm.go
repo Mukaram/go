@@ -38,7 +38,7 @@ import (
 	"log"
 )
 
-func gentext() {
+func genplt() {
 	var s *ld.LSym
 	var stub *ld.LSym
 	var pprevtextp **ld.LSym
@@ -137,6 +137,84 @@ func gentext() {
 			ld.Ctxt.Arch.ByteOrder.PutUint32(s.P[r.Off+4:], o1)
 		}
 	}
+
+}
+
+func genaddmoduledata() {
+	addmoduledata := ld.Linkrlookup(ld.Ctxt, "runtime.addmoduledata", 0)
+	if addmoduledata.Type == obj.STEXT {
+		return
+	}
+	addmoduledata.Reachable = true
+	initfunc := ld.Linklookup(ld.Ctxt, "go.link.addmoduledata", 0)
+	initfunc.Type = obj.STEXT
+	initfunc.Local = true
+	initfunc.Reachable = true
+	o := func(op uint32) {
+		ld.Adduint32(ld.Ctxt, initfunc, op)
+	}
+	// addis r2, r12, .TOC.-func@ha
+	rel := ld.Addrel(initfunc)
+	rel.Off = int32(initfunc.Size)
+	rel.Siz = 8
+	rel.Sym = ld.Linklookup(ld.Ctxt, ".TOC.", 0)
+	rel.Type = obj.R_ADDRPOWER_PCREL
+	o(0x3c4c0000)
+	// addi r2, r2, .TOC.-func@l
+	o(0x38420000)
+	// mflr r31
+	o(0x7c0802a6)
+	// stdu r31, -32(r1)
+	o(0xf801ffe1)
+	// addis r3, r2, local.moduledata@got@ha
+	rel = ld.Addrel(initfunc)
+	rel.Off = int32(initfunc.Size)
+	rel.Siz = 8
+	rel.Sym = ld.Linklookup(ld.Ctxt, "local.moduledata", 0)
+	rel.Type = obj.R_ADDRPOWER_GOT
+	o(0x3c620000)
+	// ld r3, local.moduledata@got@l(r3)
+	o(0xe8630000)
+	// bl runtime.addmoduledata
+	rel = ld.Addrel(initfunc)
+	rel.Off = int32(initfunc.Size)
+	rel.Siz = 4
+	rel.Sym = addmoduledata
+	rel.Type = obj.R_CALLPOWER
+	o(0x48000001)
+	// nop
+	o(0x60000000)
+	// ld r31, 0(r1)
+	o(0xe8010000)
+	// mtlr r31
+	o(0x7c0803a6)
+	// addi r1,r1,32
+	o(0x38210020)
+	// blr
+	o(0x4e800020)
+
+	if ld.Ctxt.Etextp != nil {
+		ld.Ctxt.Etextp.Next = initfunc
+	} else {
+		ld.Ctxt.Textp = initfunc
+	}
+	ld.Ctxt.Etextp = initfunc
+
+	initarray_entry := ld.Linklookup(ld.Ctxt, "go.link.addmoduledatainit", 0)
+	initarray_entry.Reachable = true
+	initarray_entry.Local = true
+	initarray_entry.Type = obj.SINITARR
+	ld.Addaddr(ld.Ctxt, initarray_entry, initfunc)
+}
+
+func gentext() {
+	if ld.DynlinkingGo() {
+		genaddmoduledata()
+	}
+
+	if ld.Linkmode == ld.LinkInternal {
+		genplt()
+	}
 }
 
 // Construct a call stub in stub that calls symbol targ via its PLT
@@ -214,6 +292,16 @@ func adddynrel(s *ld.LSym, r *ld.Reloc) {
 		if targ.Type == obj.SDYNIMPORT {
 			// Should have been handled in elfsetupplt
 			ld.Diag("unexpected R_PPC64_REL24 for dyn import")
+		}
+
+		return
+
+	case 256 + ld.R_PPC_REL32:
+		r.Type = obj.R_PCREL
+		r.Add += 4
+
+		if targ.Type == obj.SDYNIMPORT {
+			ld.Diag("unexpected R_PPC_REL32 for dyn import")
 		}
 
 		return
@@ -310,8 +398,17 @@ func elfreloc1(r *ld.Reloc, sectoff int64) int {
 			return -1
 		}
 
+	case obj.R_POWER_TLS:
+		ld.Thearch.Vput(ld.R_PPC64_TLS | uint64(elfsym)<<32)
+
 	case obj.R_POWER_TLS_LE:
 		ld.Thearch.Vput(ld.R_PPC64_TPREL16 | uint64(elfsym)<<32)
+
+	case obj.R_POWER_TLS_IE:
+		ld.Thearch.Vput(ld.R_PPC64_GOT_TPREL16_HA | uint64(elfsym)<<32)
+		ld.Thearch.Vput(uint64(r.Xadd))
+		ld.Thearch.Vput(uint64(sectoff + 4))
+		ld.Thearch.Vput(ld.R_PPC64_GOT_TPREL16_LO_DS | uint64(elfsym)<<32)
 
 	case obj.R_ADDRPOWER:
 		ld.Thearch.Vput(ld.R_PPC64_ADDR16_HA | uint64(elfsym)<<32)
@@ -324,6 +421,31 @@ func elfreloc1(r *ld.Reloc, sectoff int64) int {
 		ld.Thearch.Vput(uint64(r.Xadd))
 		ld.Thearch.Vput(uint64(sectoff + 4))
 		ld.Thearch.Vput(ld.R_PPC64_ADDR16_LO_DS | uint64(elfsym)<<32)
+
+	case obj.R_ADDRPOWER_GOT:
+		ld.Thearch.Vput(ld.R_PPC64_GOT16_HA | uint64(elfsym)<<32)
+		ld.Thearch.Vput(uint64(r.Xadd))
+		ld.Thearch.Vput(uint64(sectoff + 4))
+		ld.Thearch.Vput(ld.R_PPC64_GOT16_LO_DS | uint64(elfsym)<<32)
+
+	case obj.R_ADDRPOWER_PCREL:
+		ld.Thearch.Vput(ld.R_PPC64_REL16_HA | uint64(elfsym)<<32)
+		ld.Thearch.Vput(uint64(r.Xadd))
+		ld.Thearch.Vput(uint64(sectoff + 4))
+		ld.Thearch.Vput(ld.R_PPC64_REL16_LO | uint64(elfsym)<<32)
+		r.Xadd += 4
+
+	case obj.R_ADDRPOWER_TOCREL:
+		ld.Thearch.Vput(ld.R_PPC64_TOC16_HA | uint64(elfsym)<<32)
+		ld.Thearch.Vput(uint64(r.Xadd))
+		ld.Thearch.Vput(uint64(sectoff + 4))
+		ld.Thearch.Vput(ld.R_PPC64_TOC16_LO | uint64(elfsym)<<32)
+
+	case obj.R_ADDRPOWER_TOCREL_DS:
+		ld.Thearch.Vput(ld.R_PPC64_TOC16_HA | uint64(elfsym)<<32)
+		ld.Thearch.Vput(uint64(r.Xadd))
+		ld.Thearch.Vput(uint64(sectoff + 4))
+		ld.Thearch.Vput(ld.R_PPC64_TOC16_LO_DS | uint64(elfsym)<<32)
 
 	case obj.R_CALLPOWER:
 		if r.Siz != 4 {
@@ -425,7 +547,7 @@ func archreloc(r *ld.Reloc, s *ld.LSym, val *int64) int {
 		default:
 			return -1
 
-		case obj.R_POWER_TLS_LE:
+		case obj.R_POWER_TLS, obj.R_POWER_TLS_LE, obj.R_POWER_TLS_IE:
 			r.Done = 0
 			// check Outer is nil, Type is TLSBSS?
 			r.Xadd = r.Add
@@ -433,7 +555,11 @@ func archreloc(r *ld.Reloc, s *ld.LSym, val *int64) int {
 			return 0
 
 		case obj.R_ADDRPOWER,
-			obj.R_ADDRPOWER_DS:
+			obj.R_ADDRPOWER_DS,
+			obj.R_ADDRPOWER_TOCREL,
+			obj.R_ADDRPOWER_TOCREL_DS,
+			obj.R_ADDRPOWER_GOT,
+			obj.R_ADDRPOWER_PCREL:
 			r.Done = 0
 
 			// set up addend for eventual relocation via outer symbol.

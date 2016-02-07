@@ -376,6 +376,8 @@ const (
 	R_AARCH64_LDST16_ABS_LO12_NC          = 284
 	R_AARCH64_LDST32_ABS_LO12_NC          = 285
 	R_AARCH64_LDST64_ABS_LO12_NC          = 286
+	R_AARCH64_ADR_GOT_PAGE                = 311
+	R_AARCH64_LD64_GOT_LO12_NC            = 312
 	R_AARCH64_TLSIE_ADR_GOTTPREL_PAGE21   = 541
 	R_AARCH64_TLSIE_LD64_GOTTPREL_LO12_NC = 542
 	R_AARCH64_TLSLE_MOVW_TPREL_G0         = 547
@@ -564,23 +566,28 @@ const (
 	R_PPC_EMB_BIT_FLD     = 115
 	R_PPC_EMB_RELSDA      = 116
 
-	R_PPC64_ADDR32       = R_PPC_ADDR32
-	R_PPC64_ADDR16_LO    = R_PPC_ADDR16_LO
-	R_PPC64_ADDR16_HA    = R_PPC_ADDR16_HA
-	R_PPC64_REL24        = R_PPC_REL24
-	R_PPC64_JMP_SLOT     = R_PPC_JMP_SLOT
-	R_PPC64_TPREL16      = R_PPC_TPREL16
-	R_PPC64_ADDR64       = 38
-	R_PPC64_TOC16        = 47
-	R_PPC64_TOC16_LO     = 48
-	R_PPC64_TOC16_HI     = 49
-	R_PPC64_TOC16_HA     = 50
-	R_PPC64_ADDR16_LO_DS = 57
-	R_PPC64_TOC16_DS     = 63
-	R_PPC64_TOC16_LO_DS  = 64
-	R_PPC64_REL16_LO     = 250
-	R_PPC64_REL16_HI     = 251
-	R_PPC64_REL16_HA     = 252
+	R_PPC64_ADDR32            = R_PPC_ADDR32
+	R_PPC64_ADDR16_LO         = R_PPC_ADDR16_LO
+	R_PPC64_ADDR16_HA         = R_PPC_ADDR16_HA
+	R_PPC64_REL24             = R_PPC_REL24
+	R_PPC64_GOT16_HA          = R_PPC_GOT16_HA
+	R_PPC64_JMP_SLOT          = R_PPC_JMP_SLOT
+	R_PPC64_TPREL16           = R_PPC_TPREL16
+	R_PPC64_ADDR64            = 38
+	R_PPC64_TOC16             = 47
+	R_PPC64_TOC16_LO          = 48
+	R_PPC64_TOC16_HI          = 49
+	R_PPC64_TOC16_HA          = 50
+	R_PPC64_ADDR16_LO_DS      = 57
+	R_PPC64_GOT16_LO_DS       = 59
+	R_PPC64_TOC16_DS          = 63
+	R_PPC64_TOC16_LO_DS       = 64
+	R_PPC64_TLS               = 67
+	R_PPC64_GOT_TPREL16_LO_DS = 88
+	R_PPC64_GOT_TPREL16_HA    = 90
+	R_PPC64_REL16_LO          = 250
+	R_PPC64_REL16_HI          = 251
+	R_PPC64_REL16_HA          = 252
 
 	R_SPARC_NONE     = 0
 	R_SPARC_8        = 1
@@ -804,7 +811,10 @@ func Elfinit() {
 		}
 		fallthrough
 
-	case '6', '7':
+	case '0', '6', '7':
+		if Thearch.Thechar == '0' {
+			ehdr.flags = 0x20000000 /* MIPS 3 */
+		}
 		elf64 = true
 
 		ehdr.phoff = ELF64HDRSIZE      /* Must be be ELF64HDRSIZE: first PHdr must follow ELF header */
@@ -840,7 +850,26 @@ func Elfinit() {
 	}
 }
 
+// Make sure PT_LOAD is aligned properly and
+// that there is no gap,
+// correct ELF loaders will do this implicitly,
+// but buggy ELF loaders like the one in some
+// versions of QEMU and UPX won't.
+func fixElfPhdr(e *ElfPhdr) {
+	frag := int(e.vaddr & (e.align - 1))
+
+	e.off -= uint64(frag)
+	e.vaddr -= uint64(frag)
+	e.paddr -= uint64(frag)
+	e.filesz += uint64(frag)
+	e.memsz += uint64(frag)
+}
+
 func elf64phdr(e *ElfPhdr) {
+	if e.type_ == PT_LOAD {
+		fixElfPhdr(e)
+	}
+
 	Thearch.Lput(e.type_)
 	Thearch.Lput(e.flags)
 	Thearch.Vput(e.off)
@@ -853,16 +882,7 @@ func elf64phdr(e *ElfPhdr) {
 
 func elf32phdr(e *ElfPhdr) {
 	if e.type_ == PT_LOAD {
-		// Correct ELF loaders will do this implicitly,
-		// but buggy ELF loaders like the one in some
-		// versions of QEMU won't.
-		frag := int(e.vaddr & (e.align - 1))
-
-		e.off -= uint64(frag)
-		e.vaddr -= uint64(frag)
-		e.paddr -= uint64(frag)
-		e.filesz += uint64(frag)
-		e.memsz += uint64(frag)
+		fixElfPhdr(e)
 	}
 
 	Thearch.Lput(e.type_)
@@ -1434,7 +1454,7 @@ func elfdynhash() {
 	}
 
 	switch Thearch.Thechar {
-	case '6', '7', '9':
+	case '0', '6', '7', '9':
 		sy := Linklookup(Ctxt, ".rela.plt", 0)
 		if sy.Size > 0 {
 			Elfwritedynent(s, DT_PLTREL, DT_RELA)
@@ -1574,7 +1594,7 @@ func elfshreloc(sect *Section) *ElfShdr {
 	var prefix string
 	var typ int
 	switch Thearch.Thechar {
-	case '6', '7', '9':
+	case '0', '6', '7', '9':
 		prefix = ".rela"
 		typ = SHT_RELA
 	default:
@@ -1747,7 +1767,7 @@ func doelf() {
 		Debug['d'] = 1
 
 		switch Thearch.Thechar {
-		case '6', '7', '9':
+		case '0', '6', '7', '9':
 			Addstring(shstrtab, ".rela.text")
 			Addstring(shstrtab, ".rela.rodata")
 			Addstring(shstrtab, ".rela"+relro_prefix+".typelink")
@@ -1793,7 +1813,7 @@ func doelf() {
 	if hasinitarr {
 		Addstring(shstrtab, ".init_array")
 		switch Thearch.Thechar {
-		case '6', '7', '9':
+		case '0', '6', '7', '9':
 			Addstring(shstrtab, ".rela.init_array")
 		default:
 			Addstring(shstrtab, ".rel.init_array")
@@ -1820,7 +1840,7 @@ func doelf() {
 		Addstring(shstrtab, ".dynsym")
 		Addstring(shstrtab, ".dynstr")
 		switch Thearch.Thechar {
-		case '6', '7', '9':
+		case '0', '6', '7', '9':
 			Addstring(shstrtab, ".rela")
 			Addstring(shstrtab, ".rela.plt")
 		default:
@@ -1838,7 +1858,7 @@ func doelf() {
 		s.Type = obj.SELFROSECT
 		s.Reachable = true
 		switch Thearch.Thechar {
-		case '6', '7', '9':
+		case '0', '6', '7', '9':
 			s.Size += ELF64SYMSIZE
 		default:
 			s.Size += ELF32SYMSIZE
@@ -1856,7 +1876,7 @@ func doelf() {
 
 		/* relocation table */
 		switch Thearch.Thechar {
-		case '6', '7', '9':
+		case '0', '6', '7', '9':
 			s = Linklookup(Ctxt, ".rela", 0)
 		default:
 			s = Linklookup(Ctxt, ".rel", 0)
@@ -1901,7 +1921,7 @@ func doelf() {
 		Thearch.Elfsetupplt()
 
 		switch Thearch.Thechar {
-		case '6', '7', '9':
+		case '0', '6', '7', '9':
 			s = Linklookup(Ctxt, ".rela.plt", 0)
 		default:
 			s = Linklookup(Ctxt, ".rel.plt", 0)
@@ -1930,7 +1950,7 @@ func doelf() {
 
 		elfwritedynentsym(s, DT_SYMTAB, Linklookup(Ctxt, ".dynsym", 0))
 		switch Thearch.Thechar {
-		case '6', '7', '9':
+		case '0', '6', '7', '9':
 			Elfwritedynent(s, DT_SYMENT, ELF64SYMSIZE)
 		default:
 			Elfwritedynent(s, DT_SYMENT, ELF32SYMSIZE)
@@ -1938,7 +1958,7 @@ func doelf() {
 		elfwritedynentsym(s, DT_STRTAB, Linklookup(Ctxt, ".dynstr", 0))
 		elfwritedynentsymsize(s, DT_STRSZ, Linklookup(Ctxt, ".dynstr", 0))
 		switch Thearch.Thechar {
-		case '6', '7', '9':
+		case '0', '6', '7', '9':
 			elfwritedynentsym(s, DT_RELA, Linklookup(Ctxt, ".rela", 0))
 			elfwritedynentsymsize(s, DT_RELASZ, Linklookup(Ctxt, ".rela", 0))
 			Elfwritedynent(s, DT_RELAENT, ELF64RELASIZE)
@@ -2037,6 +2057,8 @@ func Asmbelf(symo int64) {
 	switch Thearch.Thechar {
 	default:
 		Exitf("unknown architecture in asmbelf: %v", Thearch.Thechar)
+	case '0':
+		eh.machine = EM_MIPS
 	case '5':
 		eh.machine = EM_ARM
 	case '6':

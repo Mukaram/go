@@ -56,7 +56,7 @@ notintel:
 	JNE     noavx
 	MOVL    $0, CX
 	// For XGETBV, OSXSAVE bit is required and sufficient
-	BYTE $0x0F; BYTE $0x01; BYTE $0xD0
+	XGETBV
 	ANDL    $6, AX
 	CMPL    AX, $6 // Check for OS support of YMM registers
 	JNE     noavx
@@ -104,13 +104,13 @@ needtls:
 	JMP ok
 #endif
 
-	LEAQ	runtime·tls0(SB), DI
+	LEAQ	runtime·m0+m_tls(SB), DI
 	CALL	runtime·settls(SB)
 
 	// store through it, to make sure it works
 	get_tls(BX)
 	MOVQ	$0x123, g(BX)
-	MOVQ	runtime·tls0(SB), AX
+	MOVQ	runtime·m0+m_tls(SB), AX
 	CMPQ	AX, $0x123
 	JEQ 2(PC)
 	MOVL	AX, 0	// abort
@@ -378,8 +378,9 @@ TEXT runtime·stackBarrier(SB),NOSPLIT,$0
 	MOVQ	stkbar_savedLRPtr(DX)(BX*1), R8
 	MOVQ	stkbar_savedLRVal(DX)(BX*1), BX
 	// Assert that we're popping the right saved LR.
+	ADDQ	$8, R8
 	CMPQ	R8, SP
-	JNE	2(PC)
+	JEQ	2(PC)
 	MOVL	$0, 0
 	// Record that this stack barrier was hit.
 	ADDQ	$1, g_stkbarPos(CX)
@@ -550,6 +551,8 @@ TEXT ·asmcgocall(SB),NOSPLIT,$0-20
 	// come in on the m->g0 stack already.
 	get_tls(CX)
 	MOVQ	g(CX), R8
+	CMPQ	R8, $0
+	JEQ	nosave
 	MOVQ	g_m(R8), R8
 	MOVQ	m_g0(R8), SI
 	MOVQ	g(CX), DI
@@ -559,11 +562,11 @@ TEXT ·asmcgocall(SB),NOSPLIT,$0-20
 	CMPQ	SI, DI
 	JEQ	nosave
 	
+	// Switch to system stack.
 	MOVQ	m_g0(R8), SI
 	CALL	gosave<>(SB)
 	MOVQ	SI, g(CX)
 	MOVQ	(g_sched+gobuf_sp)(SI), SP
-nosave:
 
 	// Now on a scheduling stack (a pthread-created stack).
 	// Make sure we have enough room for 4 stack-backed fast-call
@@ -586,6 +589,29 @@ nosave:
 	MOVQ	DI, g(CX)
 	MOVQ	SI, SP
 
+	MOVL	AX, ret+16(FP)
+	RET
+
+nosave:
+	// Running on a system stack, perhaps even without a g.
+	// Having no g can happen during thread creation or thread teardown
+	// (see needm/dropm on Solaris, for example).
+	// This code is like the above sequence but without saving/restoring g
+	// and without worrying about the stack moving out from under us
+	// (because we're on a system stack, not a goroutine stack).
+	// The above code could be used directly if already on a system stack,
+	// but then the only path through this code would be a rare case on Solaris.
+	// Using this code for all "already on system stack" calls exercises it more,
+	// which should help keep it correct.
+	SUBQ	$64, SP
+	ANDQ	$~15, SP
+	MOVQ	$0, 48(SP)		// where above code stores g, in case someone looks during debugging
+	MOVQ	DX, 40(SP)	// save original stack pointer
+	MOVQ	BX, DI		// DI = first argument in AMD64 ABI
+	MOVQ	BX, CX		// CX = first argument in Win64
+	CALL	AX
+	MOVQ	40(SP), SI	// restore original stack pointer
+	MOVQ	SI, SP
 	MOVL	AX, ret+16(FP)
 	RET
 
@@ -796,10 +822,10 @@ TEXT runtime·getcallersp(SB),NOSPLIT,$0-16
 TEXT runtime·cputicks(SB),NOSPLIT,$0-0
 	CMPB	runtime·lfenceBeforeRdtsc(SB), $1
 	JNE	mfence
-	BYTE	$0x0f; BYTE $0xae; BYTE $0xe8 // LFENCE
+	LFENCE
 	JMP	done
 mfence:
-	BYTE	$0x0f; BYTE $0xae; BYTE $0xf0 // MFENCE
+	MFENCE
 done:
 	RDTSC
 	SHLQ	$32, DX
@@ -1197,6 +1223,15 @@ DATA masks<>+0xf0(SB)/8, $0xffffffffffffffff
 DATA masks<>+0xf8(SB)/8, $0x00ffffffffffffff
 GLOBL masks<>(SB),RODATA,$256
 
+TEXT ·checkASM(SB),NOSPLIT,$0-1
+	// check that masks<>(SB) and shifts<>(SB) are aligned to 16-byte
+	MOVQ	$masks<>(SB), AX
+	MOVQ	$shifts<>(SB), BX
+	ORQ	BX, AX
+	TESTQ	$15, AX
+	SETEQ	ret+0(FP)
+	RET
+
 // these are arguments to pshufb.  They move data down from
 // the high bytes of the register to the low bytes of the register.
 // index is how many bytes to move.
@@ -1315,14 +1350,14 @@ hugeloop:
 hugeloop_avx2:
 	CMPQ	BX, $64
 	JB	bigloop_avx2
-	MOVHDU	(SI), X0
-	MOVHDU	(DI), X1
-	MOVHDU	32(SI), X2
-	MOVHDU	32(DI), X3
-	VPCMPEQB	X1, X0, X4
-	VPCMPEQB	X2, X3, X5
-	VPAND	X4, X5, X6
-	VPMOVMSKB X6, DX
+	VMOVDQU	(SI), Y0
+	VMOVDQU	(DI), Y1
+	VMOVDQU	32(SI), Y2
+	VMOVDQU	32(DI), Y3
+	VPCMPEQB	Y1, Y0, Y4
+	VPCMPEQB	Y2, Y3, Y5
+	VPAND	Y4, Y5, Y6
+	VPMOVMSKB Y6, DX
 	ADDQ	$64, SI
 	ADDQ	$64, DI
 	SUBQ	$64, BX
@@ -1579,16 +1614,16 @@ big_loop:
 	// Compare 64-bytes per loop iteration.
 	// Loop is unrolled and uses AVX2.
 big_loop_avx2:
-	MOVHDU	(SI), X2
-	MOVHDU	(DI), X3
-	MOVHDU	32(SI), X4
-	MOVHDU	32(DI), X5
-	VPCMPEQB X2, X3, X0
-	VPMOVMSKB X0, AX
+	VMOVDQU	(SI), Y2
+	VMOVDQU	(DI), Y3
+	VMOVDQU	32(SI), Y4
+	VMOVDQU	32(DI), Y5
+	VPCMPEQB Y2, Y3, Y0
+	VPMOVMSKB Y0, AX
 	XORL	$0xffffffff, AX
 	JNE	diff32_avx2
-	VPCMPEQB X4, X5, X6
-	VPMOVMSKB X6, AX
+	VPCMPEQB Y4, Y5, Y6
+	VPMOVMSKB Y6, AX
 	XORL	$0xffffffff, AX
 	JNE	diff64_avx2
 
@@ -1873,26 +1908,26 @@ avx2:
 	JNE no_avx2
 	MOVD AX, X0
 	LEAQ -32(SI)(BX*1), R11
-	VPBROADCASTB  X0, X1
+	VPBROADCASTB  X0, Y1
 avx2_loop:
-	MOVHDU (DI), X2
-	VPCMPEQB X1, X2, X3
-	VPTEST X3, X3
+	VMOVDQU (DI), Y2
+	VPCMPEQB Y1, Y2, Y3
+	VPTEST Y3, Y3
 	JNZ avx2success
 	ADDQ $32, DI
 	CMPQ DI, R11
 	JLT avx2_loop
 	MOVQ R11, DI
-	MOVHDU (DI), X2
-	VPCMPEQB X1, X2, X3
-	VPTEST X3, X3
+	VMOVDQU (DI), Y2
+	VPCMPEQB Y1, Y2, Y3
+	VPTEST Y3, Y3
 	JNZ avx2success
 	VZEROUPPER
 	MOVQ $-1, (R8)
 	RET
 
 avx2success:
-	VPMOVMSKB X3, DX
+	VPMOVMSKB Y3, DX
 	BSFL DX, DX
 	SUBQ SI, DI
 	ADDQ DI, DX

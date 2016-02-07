@@ -6,7 +6,10 @@
 
 package runtime
 
-import "unsafe"
+import (
+	"runtime/internal/sys"
+	"unsafe"
+)
 
 func dumpregs(c *sigctxt) {
 	print("r0      ", hex(c.r0()), "\n")
@@ -48,7 +51,8 @@ func dumpregs(c *sigctxt) {
 var crashing int32
 
 // May run during STW, so write barriers are not allowed.
-//go:nowritebarrier
+//
+//go:nowritebarrierrec
 func sighandler(sig uint32, info *siginfo, ctxt unsafe.Pointer, gp *g) {
 	_g_ := getg()
 	c := &sigctxt{info, ctxt}
@@ -78,7 +82,7 @@ func sighandler(sig uint32, info *siginfo, ctxt unsafe.Pointer, gp *g) {
 		// functions are correctly handled. This smashes
 		// the stack frame but we're not going back there
 		// anyway.
-		sp := c.sp() - spAlign // needs only sizeof uint64, but must align the stack
+		sp := c.sp() - sys.SpAlign // needs only sizeof uint64, but must align the stack
 		c.set_sp(sp)
 		*(*uint64)(unsafe.Pointer(uintptr(sp))) = c.lr()
 
@@ -111,8 +115,12 @@ func sighandler(sig uint32, info *siginfo, ctxt unsafe.Pointer, gp *g) {
 		}
 	}
 
+	if c.sigcode() == _SI_USER && signal_ignored(sig) {
+		return
+	}
+
 	if flags&_SigKill != 0 {
-		exit(2)
+		dieFromSignal(int32(sig))
 	}
 
 	if flags&_SigThrow == 0 {

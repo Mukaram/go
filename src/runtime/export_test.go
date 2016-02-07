@@ -8,6 +8,7 @@ package runtime
 
 import (
 	"runtime/internal/atomic"
+	"runtime/internal/sys"
 	"unsafe"
 )
 
@@ -115,7 +116,7 @@ func GostringW(w []uint16) (s string) {
 var Gostringnocopy = gostringnocopy
 var Maxstring = &maxstring
 
-type Uintreg uintreg
+type Uintreg sys.Uintreg
 
 var Open = open
 var Close = closefd
@@ -125,7 +126,7 @@ var Write = write
 func Envs() []string     { return envs }
 func SetEnvs(e []string) { envs = e }
 
-var BigEndian = _BigEndian
+var BigEndian = sys.BigEndian
 
 // For benchmarking.
 
@@ -156,9 +157,17 @@ func BenchSetType(n int, x interface{}) {
 	})
 }
 
-const PtrSize = ptrSize
+const PtrSize = sys.PtrSize
 
 var TestingAssertE2I2GC = &testingAssertE2I2GC
 var TestingAssertE2T2GC = &testingAssertE2T2GC
 
 var ForceGCPeriod = &forcegcperiod
+
+// SetTracebackEnv is like runtime/debug.SetTraceback, but it raises
+// the "environment" traceback level, so later calls to
+// debug.SetTraceback (e.g., from testing timeouts) can't lower it.
+func SetTracebackEnv(level string) {
+	setTraceback(level)
+	traceback_env = traceback_cache
+}

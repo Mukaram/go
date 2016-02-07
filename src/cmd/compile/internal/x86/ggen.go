@@ -531,24 +531,21 @@ func cgen_bmul(op gc.Op, nl *gc.Node, nr *gc.Node, res *gc.Node) bool {
 func cgen_hmul(nl *gc.Node, nr *gc.Node, res *gc.Node) {
 	var n1 gc.Node
 	var n2 gc.Node
-	var ax gc.Node
-	var dx gc.Node
 
 	t := nl.Type
 	a := optoas(gc.OHMUL, t)
 
 	// gen nl in n1.
 	gc.Tempname(&n1, t)
-
 	gc.Cgen(nl, &n1)
 
 	// gen nr in n2.
 	gc.Regalloc(&n2, t, res)
-
 	gc.Cgen(nr, &n2)
 
-	// multiply.
-	gc.Nodreg(&ax, t, x86.REG_AX)
+	var ax, oldax, dx, olddx gc.Node
+	savex(x86.REG_AX, &ax, &oldax, res, gc.Types[gc.TUINT32])
+	savex(x86.REG_DX, &dx, &olddx, res, gc.Types[gc.TUINT32])
 
 	gmove(&n2, &ax)
 	gins(a, &n1, nil)
@@ -556,14 +553,16 @@ func cgen_hmul(nl *gc.Node, nr *gc.Node, res *gc.Node) {
 
 	if t.Width == 1 {
 		// byte multiply behaves differently.
-		gc.Nodreg(&ax, t, x86.REG_AH)
-
-		gc.Nodreg(&dx, t, x86.REG_DX)
-		gmove(&ax, &dx)
+		var byteAH, byteDX gc.Node
+		gc.Nodreg(&byteAH, t, x86.REG_AH)
+		gc.Nodreg(&byteDX, t, x86.REG_DX)
+		gmove(&byteAH, &byteDX)
 	}
 
-	gc.Nodreg(&dx, t, x86.REG_DX)
 	gmove(&dx, res)
+
+	restx(&ax, &oldax)
+	restx(&dx, &olddx)
 }
 
 /*
@@ -765,9 +764,7 @@ func bgen_float(n *gc.Node, wantTrue bool, likely int, to *obj.Prog) {
 				gc.Cgen(nr, &tmp)
 				gc.Cgen(nl, &tmp)
 			}
-
-			gins(x86.AFUCOMIP, &tmp, &n2)
-			gins(x86.AFMOVDP, &tmp, &tmp) // annoying pop but still better than STSW+SAHF
+			gins(x86.AFUCOMPP, &tmp, &n2)
 		} else {
 			// TODO(rsc): The moves back and forth to memory
 			// here are for truncating the value to 32 bits.
@@ -784,9 +781,9 @@ func bgen_float(n *gc.Node, wantTrue bool, likely int, to *obj.Prog) {
 			gc.Cgen(nl, &t2)
 			gmove(&t2, &tmp)
 			gins(x86.AFCOMFP, &t1, &tmp)
-			gins(x86.AFSTSW, nil, &ax)
-			gins(x86.ASAHF, nil, nil)
 		}
+		gins(x86.AFSTSW, nil, &ax)
+		gins(x86.ASAHF, nil, nil)
 	} else {
 		// Not 387
 		if !nl.Addable {

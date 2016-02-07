@@ -551,6 +551,12 @@ func ldelf(f *obj.Biobuf, pkg string, length int64, pn string) {
 		Diag("%s: elf %s unimplemented", pn, Thestring)
 		return
 
+	case '0':
+		if elfobj.machine != ElfMachMips || hdr.Ident[4] != ElfClass64 {
+			Diag("%s: elf object but not mips64", pn)
+			return
+		}
+
 	case '5':
 		if e != binary.LittleEndian || elfobj.machine != ElfMachArm || hdr.Ident[4] != ElfClass32 {
 			Diag("%s: elf object but not arm", pn)
@@ -1070,7 +1076,7 @@ func readelfsym(elfobj *ElfObj, i int, sym *ElfSym, needSym int) (err error) {
 
 		case ElfSymBindWeak:
 			if needSym != 0 {
-				s = linknewsym(Ctxt, sym.name, 0)
+				s = Linklookup(Ctxt, sym.name, 0)
 				if sym.other == 2 {
 					s.Type |= obj.SHIDDEN
 				}
@@ -1153,7 +1159,8 @@ func reltype(pn string, elftype int, siz *uint8) int {
 		'8' | R_386_GOTOFF<<24,
 		'8' | R_386_GOTPC<<24,
 		'8' | R_386_GOT32X<<24,
-		'9' | R_PPC64_REL24<<24:
+		'9' | R_PPC64_REL24<<24,
+		'9' | R_PPC_REL32<<24:
 		*siz = 4
 
 	case '6' | R_X86_64_64<<24,

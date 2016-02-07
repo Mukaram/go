@@ -249,7 +249,7 @@ func addmove(r *Flow, bn int, rn int, f int) {
 	p1.As = int16(Thearch.Optoas(OAS, Types[uint8(v.etype)]))
 
 	// TODO(rsc): Remove special case here.
-	if (Thearch.Thechar == '5' || Thearch.Thechar == '7' || Thearch.Thechar == '9') && v.etype == TBOOL {
+	if (Thearch.Thechar == '0' || Thearch.Thechar == '5' || Thearch.Thechar == '7' || Thearch.Thechar == '9') && v.etype == TBOOL {
 		p1.As = int16(Thearch.Optoas(OAS, Types[TUINT8]))
 	}
 	p1.From.Type = obj.TYPE_REG
@@ -302,7 +302,7 @@ func mkvar(f *Flow, a *obj.Addr) Bits {
 		// TODO(rsc): Remove special case here.
 	case obj.TYPE_ADDR:
 		var bit Bits
-		if Thearch.Thechar == '5' || Thearch.Thechar == '7' || Thearch.Thechar == '9' {
+		if Thearch.Thechar == '0' || Thearch.Thechar == '5' || Thearch.Thechar == '7' || Thearch.Thechar == '9' {
 			goto memcase
 		}
 		a.Type = obj.TYPE_MEM
@@ -1073,6 +1073,9 @@ func regopt(firstp *obj.Prog) {
 
 	for f := firstf; f != nil; f = f.Link {
 		p := f.Prog
+		// AVARLIVE must be considered a use, do not skip it.
+		// Otherwise the variable will be optimized away,
+		// and the whole point of AVARLIVE is to keep it on the stack.
 		if p.As == obj.AVARDEF || p.As == obj.AVARKILL {
 			continue
 		}

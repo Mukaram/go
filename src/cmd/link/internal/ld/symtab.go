@@ -67,7 +67,7 @@ func putelfstr(s string) int {
 
 func putelfsyment(off int, addr int64, size int64, info int, shndx int, other int) {
 	switch Thearch.Thechar {
-	case '6', '7', '9':
+	case '0', '6', '7', '9':
 		Thearch.Lput(uint32(off))
 		Cput(uint8(info))
 		Cput(uint8(other))
@@ -161,6 +161,12 @@ func putelfsym(x *LSym, s string, t int, addr int64, size int64, ver int, go_ *L
 	other := STV_DEFAULT
 	if x.Type&obj.SHIDDEN != 0 {
 		other = STV_HIDDEN
+	}
+	if (Buildmode == BuildmodePIE || DynlinkingGo()) && Thearch.Thechar == '9' && type_ == STT_FUNC && x.Name != "runtime.duffzero" && x.Name != "runtime.duffcopy" {
+		// On ppc64 the top three bits of the st_other field indicate how
+		// many instructions separate the global and local entry points. In
+		// our case it is two instructions, indicated by the value 3.
+		other |= 3 << 5
 	}
 
 	if DynlinkingGo() && bind == STB_GLOBAL && elfbind == STB_LOCAL && x.Type == obj.STEXT {

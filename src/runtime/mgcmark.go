@@ -8,6 +8,7 @@ package runtime
 
 import (
 	"runtime/internal/atomic"
+	"runtime/internal/sys"
 	"unsafe"
 )
 
@@ -201,7 +202,7 @@ func markroot(i uint32) {
 //
 //go:nowritebarrier
 func markrootBlock(b0, n0 uintptr, ptrmask0 *uint8, gcw *gcWork, shard int) {
-	if rootBlockBytes%(8*ptrSize) != 0 {
+	if rootBlockBytes%(8*sys.PtrSize) != 0 {
 		// This is necessary to pick byte offsets in ptrmask0.
 		throw("rootBlockBytes must be a multiple of 8*ptrSize")
 	}
@@ -210,7 +211,7 @@ func markrootBlock(b0, n0 uintptr, ptrmask0 *uint8, gcw *gcWork, shard int) {
 	if b >= b0+n0 {
 		return
 	}
-	ptrmask := (*uint8)(add(unsafe.Pointer(ptrmask0), uintptr(shard)*(rootBlockBytes/(8*ptrSize))))
+	ptrmask := (*uint8)(add(unsafe.Pointer(ptrmask0), uintptr(shard)*(rootBlockBytes/(8*sys.PtrSize))))
 	n := uintptr(rootBlockBytes)
 	if b+n > b0+n0 {
 		n = b0 + n0 - b
@@ -300,7 +301,7 @@ func markrootSpans(gcw *gcWork, shard int) {
 			scanobject(p, gcw)
 
 			// The special itself is a root.
-			scanblock(uintptr(unsafe.Pointer(&spf.fn)), ptrSize, &oneptrmask[0], gcw)
+			scanblock(uintptr(unsafe.Pointer(&spf.fn)), sys.PtrSize, &oneptrmask[0], gcw)
 		}
 
 		unlock(&s.speciallock)
@@ -490,7 +491,8 @@ retry:
 }
 
 // gcWakeAllAssists wakes all currently blocked assists. This is used
-// at the end of a GC cycle.
+// at the end of a GC cycle. gcBlackenEnabled must be false to prevent
+// new assists from going to sleep after this point.
 func gcWakeAllAssists() {
 	lock(&work.assistQueue.lock)
 	injectglist(work.assistQueue.head.ptr())
@@ -503,6 +505,12 @@ func gcWakeAllAssists() {
 // credit. This first satisfies blocked assists on the
 // work.assistQueue and then flushes any remaining credit to
 // gcController.bgScanCredit.
+//
+// Write barriers are disallowed because this is used by gcDrain after
+// it has ensured that all work is drained and this must preserve that
+// condition.
+//
+//go:nowritebarrierrec
 func gcFlushBgCredit(scanWork int64) {
 	if work.assistQueue.head == 0 {
 		// Fast path; there are no blocked assists. There's a
@@ -619,6 +627,8 @@ func scanstack(gp *g) {
 			throw("g already has stack barriers")
 		}
 
+		gcLockStackBarriers(gp)
+
 	case _GCmarktermination:
 		if int(gp.stkbarPos) == len(gp.stkbar) {
 			// gp hit all of the stack barriers (or there
@@ -674,6 +684,9 @@ func scanstack(gp *g) {
 	if gcphase == _GCmarktermination {
 		gcw.dispose()
 	}
+	if gcphase == _GCmark {
+		gcUnlockStackBarriers(gp)
+	}
 	gp.gcscanvalid = true
 }
 
@@ -704,11 +717,11 @@ func scanframeworker(frame *stkframe, cache *pcvalueCache, gcw *gcWork) {
 	// Scan local variables if stack frame has been allocated.
 	size := frame.varp - frame.sp
 	var minsize uintptr
-	switch thechar {
+	switch sys.TheChar {
 	case '7':
-		minsize = spAlign
+		minsize = sys.SpAlign
 	default:
-		minsize = minFrameSize
+		minsize = sys.MinFrameSize
 	}
 	if size > minsize {
 		stkmap := (*stackmap)(funcdata(f, _FUNCDATA_LocalsPointerMaps))
@@ -724,7 +737,7 @@ func scanframeworker(frame *stkframe, cache *pcvalueCache, gcw *gcWork) {
 			throw("scanframe: bad symbol table")
 		}
 		bv := stackmapdata(stkmap, pcdata)
-		size = uintptr(bv.n) * ptrSize
+		size = uintptr(bv.n) * sys.PtrSize
 		scanblock(frame.varp-size, size, bv.bytedata, gcw)
 	}
 
@@ -746,7 +759,7 @@ func scanframeworker(frame *stkframe, cache *pcvalueCache, gcw *gcWork) {
 			}
 			bv = stackmapdata(stkmap, pcdata)
 		}
-		scanblock(frame.argp, uintptr(bv.n)*ptrSize, bv.bytedata, gcw)
+		scanblock(frame.argp, uintptr(bv.n)*sys.PtrSize, bv.bytedata, gcw)
 	}
 }
 
@@ -779,12 +792,12 @@ const (
 //
 //go:nowritebarrier
 func gcDrain(gcw *gcWork, flags gcDrainFlags) {
-	if !writeBarrierEnabled {
+	if !writeBarrier.needed {
 		throw("gcDrain phase incorrect")
 	}
 
 	gp := getg()
-	preemtible := flags&gcDrainUntilPreempt != 0
+	preemptible := flags&gcDrainUntilPreempt != 0
 	blocking := flags&(gcDrainUntilPreempt|gcDrainNoBlock) == 0
 	flushBgCredit := flags&gcDrainFlushBgCredit != 0
 
@@ -803,9 +816,13 @@ func gcDrain(gcw *gcWork, flags gcDrainFlags) {
 	initScanWork := gcw.scanWork
 
 	// Drain heap marking jobs.
-	for !(preemtible && gp.preempt) {
-		// If another proc wants a pointer, give it some.
-		if work.nwait > 0 && work.full == 0 {
+	for !(preemptible && gp.preempt) {
+		// Try to keep work available on the global queue. We used to
+		// check if there were waiting workers, but it's better to
+		// just keep work available than to make workers wait. In the
+		// worst case, we'll do O(log(_WorkbufSize)) unnecessary
+		// balances.
+		if work.full == 0 {
 			gcw.balance()
 		}
 
@@ -819,12 +836,6 @@ func gcDrain(gcw *gcWork, flags gcDrainFlags) {
 			// work barrier reached or tryGet failed.
 			break
 		}
-		// If the current wbuf is filled by the scan a new wbuf might be
-		// returned that could possibly hold only a single object. This
-		// could result in each iteration draining only a single object
-		// out of the wbuf passed in + a single object placed
-		// into an empty wbuf in scanobject so there could be
-		// a performance hit as we keep fetching fresh wbufs.
 		scanobject(b, gcw)
 
 		// Flush background scan work credit to the global
@@ -839,6 +850,10 @@ func gcDrain(gcw *gcWork, flags gcDrainFlags) {
 			gcw.scanWork = 0
 		}
 	}
+
+	// In blocking mode, write barriers are not allowed after this
+	// point because we must preserve the condition that the work
+	// buffers are empty.
 
 	// Flush remaining scan work credit.
 	if gcw.scanWork > 0 {
@@ -858,7 +873,7 @@ func gcDrain(gcw *gcWork, flags gcDrainFlags) {
 // increments. It returns the amount of scan work performed.
 //go:nowritebarrier
 func gcDrainN(gcw *gcWork, scanWork int64) int64 {
-	if !writeBarrierEnabled {
+	if !writeBarrier.needed {
 		throw("gcDrainN phase incorrect")
 	}
 
@@ -868,10 +883,16 @@ func gcDrainN(gcw *gcWork, scanWork int64) int64 {
 
 	gp := getg().m.curg
 	for !gp.preempt && workFlushed+gcw.scanWork < scanWork {
+		// See gcDrain comment.
+		if work.full == 0 {
+			gcw.balance()
+		}
+
 		// This might be a good place to add prefetch code...
 		// if(wbuf.nobj > 4) {
 		//         PREFETCH(wbuf->obj[wbuf.nobj - 3];
 		//  }
+		//
 		b := gcw.tryGet()
 		if b == 0 {
 			break
@@ -912,9 +933,9 @@ func scanblock(b0, n0 uintptr, ptrmask *uint8, gcw *gcWork) {
 
 	for i := uintptr(0); i < n; {
 		// Find bits for the next word.
-		bits := uint32(*addb(ptrmask, i/(ptrSize*8)))
+		bits := uint32(*addb(ptrmask, i/(sys.PtrSize*8)))
 		if bits == 0 {
-			i += ptrSize * 8
+			i += sys.PtrSize * 8
 			continue
 		}
 		for j := 0; j < 8 && i < n; j++ {
@@ -928,7 +949,7 @@ func scanblock(b0, n0 uintptr, ptrmask *uint8, gcw *gcWork) {
 				}
 			}
 			bits >>= 1
-			i += ptrSize
+			i += sys.PtrSize
 		}
 	}
 }
@@ -962,7 +983,7 @@ func scanobject(b uintptr, gcw *gcWork) {
 	}
 
 	var i uintptr
-	for i = 0; i < n; i += ptrSize {
+	for i = 0; i < n; i += sys.PtrSize {
 		// Find bits for this word.
 		if i != 0 {
 			// Avoid needless hbits.next() on last iteration.
@@ -973,7 +994,7 @@ func scanobject(b uintptr, gcw *gcWork) {
 		// are pointers, or else they'd be merged with other non-pointer
 		// data into larger allocations.
 		bits := hbits.bits()
-		if i >= 2*ptrSize && bits&bitMarked == 0 {
+		if i >= 2*sys.PtrSize && bits&bitMarked == 0 {
 			break // no more pointers in this object
 		}
 		if bits&bitPointer == 0 {
@@ -1016,10 +1037,10 @@ func shade(b uintptr) {
 // obj is the start of an object with mark mbits.
 // If it isn't already marked, mark it and enqueue into gcw.
 // base and off are for debugging only and could be removed.
-//go:nowritebarrier
+//go:nowritebarrierrec
 func greyobject(obj, base, off uintptr, hbits heapBits, span *mspan, gcw *gcWork) {
 	// obj should be start of allocation, and so must be at least pointer-aligned.
-	if obj&(ptrSize-1) != 0 {
+	if obj&(sys.PtrSize-1) != 0 {
 		throw("greyobject: obj not pointer-aligned")
 	}
 
@@ -1087,11 +1108,11 @@ func gcDumpObject(label string, obj, off uintptr) {
 	}
 	print(" s.start*_PageSize=", hex(s.start*_PageSize), " s.limit=", hex(s.limit), " s.sizeclass=", s.sizeclass, " s.elemsize=", s.elemsize, "\n")
 	skipped := false
-	for i := uintptr(0); i < s.elemsize; i += ptrSize {
+	for i := uintptr(0); i < s.elemsize; i += sys.PtrSize {
 		// For big objects, just print the beginning (because
 		// that usually hints at the object's type) and the
 		// fields around off.
-		if !(i < 128*ptrSize || off-16*ptrSize < i && i < off+16*ptrSize) {
+		if !(i < 128*sys.PtrSize || off-16*sys.PtrSize < i && i < off+16*sys.PtrSize) {
 			skipped = true
 			continue
 		}

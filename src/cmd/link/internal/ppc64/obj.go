@@ -99,8 +99,17 @@ func archinit() {
 	}
 
 	switch ld.Buildmode {
-	case ld.BuildmodePIE:
+	case ld.BuildmodePIE, ld.BuildmodeShared:
 		ld.Linkmode = ld.LinkExternal
+	}
+
+	if ld.Linkshared {
+		ld.Linkmode = ld.LinkExternal
+	}
+
+	if ld.Linkmode == ld.LinkExternal {
+		toc := ld.Linklookup(ld.Ctxt, ".TOC.", 0)
+		toc.Type = obj.SDYNIMPORT
 	}
 
 	switch ld.HEADTYPE {

@@ -635,7 +635,15 @@ func ginscmp(op gc.Op, t *gc.Type, n1, n2 *gc.Node, likely int) *obj.Prog {
 
 	// General case.
 	var r1, r2, g1, g2 gc.Node
-	if n1.Op == gc.ONAME && n1.Class&gc.PHEAP == 0 || n1.Op == gc.OINDREG {
+
+	// A special case to make write barriers more efficient.
+	// Comparing the first field of a named struct can be done directly.
+	base := n1
+	if n1.Op == gc.ODOT && n1.Left.Type.Etype == gc.TSTRUCT && n1.Left.Type.Type.Sym == n1.Right.Sym {
+		base = n1.Left
+	}
+
+	if base.Op == gc.ONAME && base.Class&gc.PHEAP == 0 || n1.Op == gc.OINDREG {
 		r1 = *n1
 	} else {
 		gc.Regalloc(&r1, t, n1)
@@ -1190,14 +1198,17 @@ func floatmove(f *gc.Node, t *gc.Node) {
 
 		// if 0 > v { answer = 0 }
 		gins(x86.AFMOVD, &zerof, &f0)
-
-		gins(x86.AFUCOMIP, &f0, &f1)
+		gins(x86.AFUCOMP, &f0, &f1)
+		gins(x86.AFSTSW, nil, &ax)
+		gins(x86.ASAHF, nil, nil)
 		p1 := gc.Gbranch(optoas(gc.OGT, gc.Types[tt]), nil, 0)
 
 		// if 1<<64 <= v { answer = 0 too }
 		gins(x86.AFMOVD, &two64f, &f0)
 
-		gins(x86.AFUCOMIP, &f0, &f1)
+		gins(x86.AFUCOMP, &f0, &f1)
+		gins(x86.AFSTSW, nil, &ax)
+		gins(x86.ASAHF, nil, nil)
 		p2 := gc.Gbranch(optoas(gc.OGT, gc.Types[tt]), nil, 0)
 		gc.Patch(p1, gc.Pc)
 		gins(x86.AFMOVVP, &f0, t) // don't care about t, but will pop the stack
@@ -1227,7 +1238,9 @@ func floatmove(f *gc.Node, t *gc.Node) {
 		// actual work
 		gins(x86.AFMOVD, &two63f, &f0)
 
-		gins(x86.AFUCOMIP, &f0, &f1)
+		gins(x86.AFUCOMP, &f0, &f1)
+		gins(x86.AFSTSW, nil, &ax)
+		gins(x86.ASAHF, nil, nil)
 		p2 = gc.Gbranch(optoas(gc.OLE, gc.Types[tt]), nil, 0)
 		gins(x86.AFMOVVP, &f0, t)
 		p3 := gc.Gbranch(obj.AJMP, nil, 0)

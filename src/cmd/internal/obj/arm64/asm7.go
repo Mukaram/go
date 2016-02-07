@@ -260,16 +260,17 @@ var optab = []Optab{
 	{AMOVW, C_VCONADDR, C_NONE, C_REG, 68, 8, 0, 0, 0},
 	{AMOVD, C_VCON, C_NONE, C_REG, 12, 4, 0, LFROM, 0},
 	{AMOVD, C_VCONADDR, C_NONE, C_REG, 68, 8, 0, 0, 0},
-	{AMOVB, C_REG, C_NONE, C_ADDR, 64, 8, 0, 0, 0},
-	{AMOVBU, C_REG, C_NONE, C_ADDR, 64, 8, 0, 0, 0},
-	{AMOVH, C_REG, C_NONE, C_ADDR, 64, 8, 0, 0, 0},
-	{AMOVW, C_REG, C_NONE, C_ADDR, 64, 8, 0, 0, 0},
-	{AMOVD, C_REG, C_NONE, C_ADDR, 64, 8, 0, 0, 0},
-	{AMOVB, C_ADDR, C_NONE, C_REG, 65, 8, 0, 0, 0},
-	{AMOVBU, C_ADDR, C_NONE, C_REG, 65, 8, 0, 0, 0},
-	{AMOVH, C_ADDR, C_NONE, C_REG, 65, 8, 0, 0, 0},
-	{AMOVW, C_ADDR, C_NONE, C_REG, 65, 8, 0, 0, 0},
-	{AMOVD, C_ADDR, C_NONE, C_REG, 65, 8, 0, 0, 0},
+	{AMOVB, C_REG, C_NONE, C_ADDR, 64, 12, 0, 0, 0},
+	{AMOVBU, C_REG, C_NONE, C_ADDR, 64, 12, 0, 0, 0},
+	{AMOVH, C_REG, C_NONE, C_ADDR, 64, 12, 0, 0, 0},
+	{AMOVW, C_REG, C_NONE, C_ADDR, 64, 12, 0, 0, 0},
+	{AMOVD, C_REG, C_NONE, C_ADDR, 64, 12, 0, 0, 0},
+	{AMOVB, C_ADDR, C_NONE, C_REG, 65, 12, 0, 0, 0},
+	{AMOVBU, C_ADDR, C_NONE, C_REG, 65, 12, 0, 0, 0},
+	{AMOVH, C_ADDR, C_NONE, C_REG, 65, 12, 0, 0, 0},
+	{AMOVW, C_ADDR, C_NONE, C_REG, 65, 12, 0, 0, 0},
+	{AMOVD, C_ADDR, C_NONE, C_REG, 65, 12, 0, 0, 0},
+	{AMOVD, C_GOTADDR, C_NONE, C_REG, 71, 8, 0, 0, 0},
 	{AMOVD, C_TLS_LE, C_NONE, C_REG, 69, 4, 0, 0, 0},
 	{AMOVD, C_TLS_IE, C_NONE, C_REG, 70, 8, 0, 0, 0},
 	{AMUL, C_REG, C_REG, C_REG, 15, 4, 0, 0, 0},
@@ -450,10 +451,10 @@ var optab = []Optab{
 	{AFMOVS, C_LOREG, C_NONE, C_FREG, 31, 8, 0, LFROM, 0},
 	{AFMOVD, C_LAUTO, C_NONE, C_FREG, 31, 8, REGSP, LFROM, 0},
 	{AFMOVD, C_LOREG, C_NONE, C_FREG, 31, 8, 0, LFROM, 0},
-	{AFMOVS, C_FREG, C_NONE, C_ADDR, 64, 8, 0, 0, 0},
-	{AFMOVS, C_ADDR, C_NONE, C_FREG, 65, 8, 0, 0, 0},
-	{AFMOVD, C_FREG, C_NONE, C_ADDR, 64, 8, 0, 0, 0},
-	{AFMOVD, C_ADDR, C_NONE, C_FREG, 65, 8, 0, 0, 0},
+	{AFMOVS, C_FREG, C_NONE, C_ADDR, 64, 12, 0, 0, 0},
+	{AFMOVS, C_ADDR, C_NONE, C_FREG, 65, 12, 0, 0, 0},
+	{AFMOVD, C_FREG, C_NONE, C_ADDR, 64, 12, 0, 0, 0},
+	{AFMOVD, C_ADDR, C_NONE, C_FREG, 65, 12, 0, 0, 0},
 	{AFADDS, C_FREG, C_NONE, C_FREG, 54, 4, 0, 0, 0},
 	{AFADDS, C_FREG, C_FREG, C_FREG, 54, 4, 0, 0, 0},
 	{AFADDS, C_FCON, C_NONE, C_FREG, 54, 4, 0, 0, 0},
@@ -535,9 +536,9 @@ func span7(ctxt *obj.Link, cursym *obj.LSym) {
 		buildop(ctxt)
 	}
 
-	bflag := 0
-	c := int32(0)
-	p.Pc = int64(c)
+	bflag := 1
+	c := int64(0)
+	p.Pc = c
 	var m int
 	var o *Optab
 	for p = p.Link; p != nil; p = p.Link {
@@ -545,11 +546,11 @@ func span7(ctxt *obj.Link, cursym *obj.LSym) {
 		if p.As == ADWORD && (c&7) != 0 {
 			c += 4
 		}
-		p.Pc = int64(c)
+		p.Pc = c
 		o = oplook(ctxt, p)
 		m = int(o.size)
 		if m == 0 {
-			if p.As != obj.ANOP && p.As != obj.AFUNCDATA && p.As != obj.APCDATA {
+			if p.As != obj.ANOP && p.As != obj.AFUNCDATA && p.As != obj.APCDATA && p.As != obj.AUSEFIELD {
 				ctxt.Diag("zero-width instruction\n%v", p)
 			}
 			continue
@@ -567,13 +568,13 @@ func span7(ctxt *obj.Link, cursym *obj.LSym) {
 		if p.As == AB || p.As == obj.ARET || p.As == AERET { /* TODO: other unconditional operations */
 			checkpool(ctxt, p, 0)
 		}
-		c += int32(m)
+		c += int64(m)
 		if ctxt.Blitrl != nil {
 			checkpool(ctxt, p, 1)
 		}
 	}
 
-	cursym.Size = int64(c)
+	cursym.Size = c
 
 	/*
 	 * if any procedure is large enough to
@@ -582,53 +583,53 @@ func span7(ctxt *obj.Link, cursym *obj.LSym) {
 	 * around jmps to fix. this is rare.
 	 */
 	for bflag != 0 {
+		if ctxt.Debugvlog != 0 {
+			fmt.Fprintf(ctxt.Bso, "%5.2f span1\n", obj.Cputime())
+		}
 		bflag = 0
 		c = 0
-		for p = cursym.Text; p != nil; p = p.Link {
+		for p = cursym.Text.Link; p != nil; p = p.Link {
 			if p.As == ADWORD && (c&7) != 0 {
 				c += 4
 			}
-			p.Pc = int64(c)
+			p.Pc = c
 			o = oplook(ctxt, p)
 
-			/* very large branches
-			if(o->type == 6 && p->cond) {
-				otxt = p->cond->pc - c;
-				if(otxt < 0)
-					otxt = -otxt;
-				if(otxt >= (1L<<17) - 10) {
-					q = ctxt->arch->prg();
-					q->link = p->link;
-					p->link = q;
-					q->as = AB;
-					q->to.type = obj.TYPE_BRANCH;
-					q->cond = p->cond;
-					p->cond = q;
-					q = ctxt->arch->prg();
-					q->link = p->link;
-					p->link = q;
-					q->as = AB;
-					q->to.type = obj.TYPE_BRANCH;
-					q->cond = q->link->link;
-					bflag = 1;
+			/* very large branches */
+			if o.type_ == 7 && p.Pcond != nil {
+				otxt := p.Pcond.Pc - c
+				if otxt <= -(1<<18)+10 || otxt >= (1<<18)-10 {
+					q := ctxt.NewProg()
+					q.Link = p.Link
+					p.Link = q
+					q.As = AB
+					q.To.Type = obj.TYPE_BRANCH
+					q.Pcond = p.Pcond
+					p.Pcond = q
+					q = ctxt.NewProg()
+					q.Link = p.Link
+					p.Link = q
+					q.As = AB
+					q.To.Type = obj.TYPE_BRANCH
+					q.Pcond = q.Link.Link
+					bflag = 1
 				}
 			}
-			*/
 			m = int(o.size)
 
 			if m == 0 {
-				if p.As != obj.ANOP && p.As != obj.AFUNCDATA && p.As != obj.APCDATA {
+				if p.As != obj.ANOP && p.As != obj.AFUNCDATA && p.As != obj.APCDATA && p.As != obj.AUSEFIELD {
 					ctxt.Diag("zero-width instruction\n%v", p)
 				}
 				continue
 			}
 
-			c += int32(m)
+			c += int64(m)
 		}
 	}
 
 	c += -c & (FuncAlign - 1)
-	cursym.Size = int64(c)
+	cursym.Size = c
 
 	/*
 	 * lay out the code, emitting code and data relocations.
@@ -692,7 +693,7 @@ func flushpool(ctxt *obj.Link, p *obj.Prog, skip int) {
 			q.Link = ctxt.Blitrl
 			q.Lineno = p.Lineno
 			ctxt.Blitrl = q
-		} else if p.Pc+int64(pool.size)-int64(pool.start) < 1024*1024 {
+		} else if p.Pc+int64(pool.size)-int64(pool.start) < maxPCDisp {
 			return
 		}
 
@@ -825,9 +826,15 @@ func regoff(ctxt *obj.Link, a *obj.Addr) uint32 {
 	return uint32(ctxt.Instoffset)
 }
 
+// Maximum PC-relative displacement.
+// The actual limit is ±2²⁰, but we are conservative
+// to avoid needing to recompute the literal pool flush points
+// as span-dependent jumps are enlarged.
+const maxPCDisp = 512 * 1024
+
+// ispcdisp reports whether v is a valid PC-relative displacement.
 func ispcdisp(v int32) bool {
-	/* pc-relative addressing will reach? */
-	return v >= -0xfffff && v <= 0xfffff && (v&3) == 0
+	return -maxPCDisp < v && v < maxPCDisp && v&3 == 0
 }
 
 func isaddcon(v int64) bool {
@@ -980,6 +987,9 @@ func aclass(ctxt *obj.Link, a *obj.Addr) int {
 				return C_ADDR
 			}
 			return C_LEXT
+
+		case obj.NAME_GOTREF:
+			return C_GOTADDR
 
 		case obj.NAME_AUTO:
 			ctxt.Instoffset = int64(ctxt.Autosize) + a.Offset
@@ -2701,26 +2711,28 @@ func asmout(ctxt *obj.Link, p *obj.Prog, o *Optab, out []uint32) {
 
 		o1 = ADR(0, uint32(d), uint32(p.To.Reg))
 
-	/* reloc ops */
+		/* reloc ops */
 	case 64: /* movT R,addr -> adrp + add + movT R, (REGTMP) */
 		o1 = ADR(1, 0, REGTMP)
-		o2 = olsr12u(ctxt, int32(opstr12(ctxt, int(p.As))), 0, REGTMP, int(p.From.Reg))
+		o2 = opirr(ctxt, AADD) | REGTMP&31<<5 | REGTMP&31
 		rel := obj.Addrel(ctxt.Cursym)
 		rel.Off = int32(ctxt.Pc)
 		rel.Siz = 8
 		rel.Sym = p.To.Sym
 		rel.Add = p.To.Offset
-		rel.Type = movereloc(p.As)
+		rel.Type = obj.R_ADDRARM64
+		o3 = olsr12u(ctxt, int32(opstr12(ctxt, int(p.As))), 0, REGTMP, int(p.From.Reg))
 
-	case 65: /* movT addr,R -> adrp REGTMP, 0; ldr R, [REGTMP, #0] + relocs */
+	case 65: /* movT addr,R -> adrp + add + movT (REGTMP), R */
 		o1 = ADR(1, 0, REGTMP)
-		o2 = olsr12u(ctxt, int32(opldr12(ctxt, int(p.As))), 0, REGTMP, int(p.To.Reg))
+		o2 = opirr(ctxt, AADD) | REGTMP&31<<5 | REGTMP&31
 		rel := obj.Addrel(ctxt.Cursym)
 		rel.Off = int32(ctxt.Pc)
+		rel.Siz = 8
 		rel.Sym = p.From.Sym
 		rel.Add = p.From.Offset
-		rel.Siz = 8
-		rel.Type = movereloc(p.As)
+		rel.Type = obj.R_ADDRARM64
+		o3 = olsr12u(ctxt, int32(opldr12(ctxt, int(p.As))), 0, REGTMP, int(p.To.Reg))
 
 	case 66: /* ldp O(R)!, (r1, r2); ldp (R)O!, (r1, r2) */
 		v := int32(p.From.Offset)
@@ -2786,6 +2798,16 @@ func asmout(ctxt *obj.Link, p *obj.Prog, o *Optab, out []uint32) {
 		if p.From.Offset != 0 {
 			ctxt.Diag("invalid offset on MOVW $tlsvar")
 		}
+
+	case 71: /* movd sym@GOT, reg -> adrp REGTMP, #0; ldr reg, [REGTMP, #0] + relocs */
+		o1 = ADR(1, 0, REGTMP)
+		o2 = olsr12u(ctxt, int32(opldr12(ctxt, AMOVD)), 0, REGTMP, int(p.To.Reg))
+		rel := obj.Addrel(ctxt.Cursym)
+		rel.Off = int32(ctxt.Pc)
+		rel.Siz = 8
+		rel.Sym = p.From.Sym
+		rel.Add = 0
+		rel.Type = obj.R_ARM64_GOTPCREL
 
 	// This is supposed to be something that stops execution.
 	// It's not supposed to be reached, ever, but if it is, we'd
@@ -3638,7 +3660,8 @@ func brdist(ctxt *obj.Link, p *obj.Prog, preshift int, flen int, shift int) int6
 		v >>= uint(shift)
 		t = int64(1) << uint(flen-1)
 		if v < -t || v >= t {
-			ctxt.Diag("branch too far\n%v", p)
+			ctxt.Diag("branch too far %#x vs %#x [%p]\n%v\n%v", v, t, ctxt.Blitrl, p, p.Pcond)
+			panic("branch too far")
 		}
 	}
 
@@ -4158,20 +4181,4 @@ func movesize(a int) int {
 	default:
 		return -1
 	}
-}
-
-func movereloc(a int16) int32 {
-	switch movesize(int(a)) {
-	case 0:
-		return obj.R_ARM64_LOAD8
-	case 1:
-		return obj.R_ARM64_LOAD16
-	case 2:
-		return obj.R_ARM64_LOAD32
-	case 3:
-		return obj.R_ARM64_LOAD64
-	case -1:
-		panic("xxx")
-	}
-	return -1
 }

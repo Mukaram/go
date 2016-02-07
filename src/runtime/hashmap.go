@@ -55,6 +55,7 @@ package runtime
 
 import (
 	"runtime/internal/atomic"
+	"runtime/internal/sys"
 	"unsafe"
 )
 
@@ -94,9 +95,10 @@ const (
 	// flags
 	iterator    = 1 // there may be an iterator using buckets
 	oldIterator = 2 // there may be an iterator using oldbuckets
+	hashWriting = 4 // a goroutine is writing to the map
 
 	// sentinel bucket ID for iterator checks
-	noCheck = 1<<(8*ptrSize) - 1
+	noCheck = 1<<(8*sys.PtrSize) - 1
 )
 
 // A header for a Go map.
@@ -160,7 +162,7 @@ func evacuated(b *bmap) bool {
 }
 
 func (b *bmap) overflow(t *maptype) *bmap {
-	return *(**bmap)(add(unsafe.Pointer(b), uintptr(t.bucketsize)-ptrSize))
+	return *(**bmap)(add(unsafe.Pointer(b), uintptr(t.bucketsize)-sys.PtrSize))
 }
 
 func (h *hmap) setoverflow(t *maptype, b, ovf *bmap) {
@@ -168,7 +170,7 @@ func (h *hmap) setoverflow(t *maptype, b, ovf *bmap) {
 		h.createOverflow()
 		*h.overflow[0] = append(*h.overflow[0], ovf)
 	}
-	*(**bmap)(add(unsafe.Pointer(b), uintptr(t.bucketsize)-ptrSize)) = ovf
+	*(**bmap)(add(unsafe.Pointer(b), uintptr(t.bucketsize)-sys.PtrSize)) = ovf
 }
 
 func (h *hmap) createOverflow() {
@@ -201,11 +203,11 @@ func makemap(t *maptype, hint int64, h *hmap, bucket unsafe.Pointer) *hmap {
 	}
 
 	// check compiler's and reflect's math
-	if t.key.size > maxKeySize && (!t.indirectkey || t.keysize != uint8(ptrSize)) ||
+	if t.key.size > maxKeySize && (!t.indirectkey || t.keysize != uint8(sys.PtrSize)) ||
 		t.key.size <= maxKeySize && (t.indirectkey || t.keysize != uint8(t.key.size)) {
 		throw("key size wrong")
 	}
-	if t.elem.size > maxValueSize && (!t.indirectvalue || t.valuesize != uint8(ptrSize)) ||
+	if t.elem.size > maxValueSize && (!t.indirectvalue || t.valuesize != uint8(sys.PtrSize)) ||
 		t.elem.size <= maxValueSize && (t.indirectvalue || t.valuesize != uint8(t.elem.size)) {
 		throw("value size wrong")
 	}
@@ -283,6 +285,9 @@ func mapaccess1(t *maptype, h *hmap, key unsafe.Pointer) unsafe.Pointer {
 	if h == nil || h.count == 0 {
 		return atomic.Loadp(unsafe.Pointer(&zeroptr))
 	}
+	if h.flags&hashWriting != 0 {
+		throw("concurrent map read and map write")
+	}
 	alg := t.key.alg
 	hash := alg.hash(key, uintptr(h.hash0))
 	m := uintptr(1)<<h.B - 1
@@ -293,7 +298,7 @@ func mapaccess1(t *maptype, h *hmap, key unsafe.Pointer) unsafe.Pointer {
 			b = oldb
 		}
 	}
-	top := uint8(hash >> (ptrSize*8 - 8))
+	top := uint8(hash >> (sys.PtrSize*8 - 8))
 	if top < minTopHash {
 		top += minTopHash
 	}
@@ -334,6 +339,9 @@ func mapaccess2(t *maptype, h *hmap, key unsafe.Pointer) (unsafe.Pointer, bool) 
 	if h == nil || h.count == 0 {
 		return atomic.Loadp(unsafe.Pointer(&zeroptr)), false
 	}
+	if h.flags&hashWriting != 0 {
+		throw("concurrent map read and map write")
+	}
 	alg := t.key.alg
 	hash := alg.hash(key, uintptr(h.hash0))
 	m := uintptr(1)<<h.B - 1
@@ -344,7 +352,7 @@ func mapaccess2(t *maptype, h *hmap, key unsafe.Pointer) (unsafe.Pointer, bool) 
 			b = oldb
 		}
 	}
-	top := uint8(hash >> (ptrSize*8 - 8))
+	top := uint8(hash >> (sys.PtrSize*8 - 8))
 	if top < minTopHash {
 		top += minTopHash
 	}
@@ -377,6 +385,9 @@ func mapaccessK(t *maptype, h *hmap, key unsafe.Pointer) (unsafe.Pointer, unsafe
 	if h == nil || h.count == 0 {
 		return nil, nil
 	}
+	if h.flags&hashWriting != 0 {
+		throw("concurrent map read and map write")
+	}
 	alg := t.key.alg
 	hash := alg.hash(key, uintptr(h.hash0))
 	m := uintptr(1)<<h.B - 1
@@ -387,7 +398,7 @@ func mapaccessK(t *maptype, h *hmap, key unsafe.Pointer) (unsafe.Pointer, unsafe
 			b = oldb
 		}
 	}
-	top := uint8(hash >> (ptrSize*8 - 8))
+	top := uint8(hash >> (sys.PtrSize*8 - 8))
 	if top < minTopHash {
 		top += minTopHash
 	}
@@ -430,6 +441,10 @@ func mapassign1(t *maptype, h *hmap, key unsafe.Pointer, val unsafe.Pointer) {
 		msanread(key, t.key.size)
 		msanread(val, t.elem.size)
 	}
+	if h.flags&hashWriting != 0 {
+		throw("concurrent map writes")
+	}
+	h.flags |= hashWriting
 
 	alg := t.key.alg
 	hash := alg.hash(key, uintptr(h.hash0))
@@ -444,7 +459,7 @@ again:
 		growWork(t, h, bucket)
 	}
 	b := (*bmap)(unsafe.Pointer(uintptr(h.buckets) + bucket*uintptr(t.bucketsize)))
-	top := uint8(hash >> (ptrSize*8 - 8))
+	top := uint8(hash >> (sys.PtrSize*8 - 8))
 	if top < minTopHash {
 		top += minTopHash
 	}
@@ -480,7 +495,7 @@ again:
 				v2 = *((*unsafe.Pointer)(v2))
 			}
 			typedmemmove(t.elem, v2, val)
-			return
+			goto done
 		}
 		ovf := b.overflow(t)
 		if ovf == nil {
@@ -519,6 +534,12 @@ again:
 	typedmemmove(t.elem, insertv, val)
 	*inserti = top
 	h.count++
+
+done:
+	if h.flags&hashWriting == 0 {
+		throw("concurrent map writes")
+	}
+	h.flags &^= hashWriting
 }
 
 func mapdelete(t *maptype, h *hmap, key unsafe.Pointer) {
@@ -534,6 +555,11 @@ func mapdelete(t *maptype, h *hmap, key unsafe.Pointer) {
 	if h == nil || h.count == 0 {
 		return
 	}
+	if h.flags&hashWriting != 0 {
+		throw("concurrent map writes")
+	}
+	h.flags |= hashWriting
+
 	alg := t.key.alg
 	hash := alg.hash(key, uintptr(h.hash0))
 	bucket := hash & (uintptr(1)<<h.B - 1)
@@ -541,7 +567,7 @@ func mapdelete(t *maptype, h *hmap, key unsafe.Pointer) {
 		growWork(t, h, bucket)
 	}
 	b := (*bmap)(unsafe.Pointer(uintptr(h.buckets) + bucket*uintptr(t.bucketsize)))
-	top := uint8(hash >> (ptrSize*8 - 8))
+	top := uint8(hash >> (sys.PtrSize*8 - 8))
 	if top < minTopHash {
 		top += minTopHash
 	}
@@ -563,13 +589,19 @@ func mapdelete(t *maptype, h *hmap, key unsafe.Pointer) {
 			memclr(v, uintptr(t.valuesize))
 			b.tophash[i] = empty
 			h.count--
-			return
+			goto done
 		}
 		b = b.overflow(t)
 		if b == nil {
-			return
+			goto done
 		}
 	}
+
+done:
+	if h.flags&hashWriting == 0 {
+		throw("concurrent map writes")
+	}
+	h.flags &^= hashWriting
 }
 
 func mapiterinit(t *maptype, h *hmap, it *hiter) {
@@ -594,7 +626,7 @@ func mapiterinit(t *maptype, h *hmap, it *hiter) {
 		return
 	}
 
-	if unsafe.Sizeof(hiter{})/ptrSize != 12 {
+	if unsafe.Sizeof(hiter{})/sys.PtrSize != 12 {
 		throw("hash_iter size incorrect") // see ../../cmd/internal/gc/reflect.go
 	}
 	it.t = t
@@ -865,7 +897,7 @@ func evacuate(t *maptype, h *hmap, oldbucket uintptr) {
 						} else {
 							hash &^= newbit
 						}
-						top = uint8(hash >> (ptrSize*8 - 8))
+						top = uint8(hash >> (sys.PtrSize*8 - 8))
 						if top < minTopHash {
 							top += minTopHash
 						}

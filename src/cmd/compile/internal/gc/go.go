@@ -484,8 +484,7 @@ var nolocalimports int
 
 var lexbuf bytes.Buffer
 var strbuf bytes.Buffer
-
-var litbuf string
+var litbuf string // LLITERAL value for use in syntax error messages
 
 var Debug [256]int
 
@@ -600,8 +599,6 @@ var incannedimport int
 
 var statuniqgen int // name generator for static temps
 
-var loophack bool
-
 var iota_ int32
 
 var lastconst *NodeList
@@ -627,8 +624,6 @@ var Widthptr int
 var Widthint int
 
 var Widthreg int
-
-var typesw *Node
 
 var nblank *Node
 

@@ -285,23 +285,23 @@ func readNotes(f *elf.File) ([]*note, error) {
 				if err == io.EOF {
 					break
 				}
-				return nil, fmt.Errorf("read namesize failed:", err)
+				return nil, fmt.Errorf("read namesize failed: %v", err)
 			}
 			err = binary.Read(r, f.ByteOrder, &descsize)
 			if err != nil {
-				return nil, fmt.Errorf("read descsize failed:", err)
+				return nil, fmt.Errorf("read descsize failed: %v", err)
 			}
 			err = binary.Read(r, f.ByteOrder, &tag)
 			if err != nil {
-				return nil, fmt.Errorf("read type failed:", err)
+				return nil, fmt.Errorf("read type failed: %v", err)
 			}
 			name, err := readwithpad(r, namesize)
 			if err != nil {
-				return nil, fmt.Errorf("read name failed:", err)
+				return nil, fmt.Errorf("read name failed: %v", err)
 			}
 			desc, err := readwithpad(r, descsize)
 			if err != nil {
-				return nil, fmt.Errorf("read desc failed:", err)
+				return nil, fmt.Errorf("read desc failed: %v", err)
 			}
 			notes = append(notes, &note{name: string(name), tag: tag, desc: string(desc), section: sect})
 		}
@@ -748,4 +748,16 @@ func TestABIChecking(t *testing.T) {
 	appendFile("src/dep/dep.go", "func noABIBreak() {}\n")
 	goCmd(t, "install", "-buildmode=shared", "-linkshared", "dep")
 	run(t, "after non-ABI breaking change", "./bin/exe")
+}
+
+// If a package 'explicit' imports a package 'implicit', building
+// 'explicit' into a shared library implicitly includes implicit in
+// the shared library. Building an executable that imports both
+// explicit and implicit builds the code from implicit into the
+// executable rather than fetching it from the shared library. The
+// link still succeeds and the executable still runs though.
+func TestImplicitInclusion(t *testing.T) {
+	goCmd(t, "install", "-buildmode=shared", "-linkshared", "explicit")
+	goCmd(t, "install", "-linkshared", "implicitcmd")
+	run(t, "running executable linked against library that contains same package as it", "./bin/implicitcmd")
 }

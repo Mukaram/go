@@ -47,10 +47,10 @@ var sysdir = func() *sysDir {
 	switch runtime.GOOS {
 	case "android":
 		return &sysDir{
-			"/system/etc",
+			"/system/framework",
 			[]string{
-				"audio_policy.conf",
-				"system_fonts.xml",
+				"ext.jar",
+				"framework.jar",
 			},
 		}
 	case "darwin":
@@ -583,6 +583,12 @@ func TestHardLink(t *testing.T) {
 	if runtime.GOOS == "plan9" {
 		t.Skip("skipping on plan9, hardlinks not supported")
 	}
+	// From Android release M (Marshmallow), hard linking files is blocked
+	// and an attempt to call link() on a file will return EACCES.
+	// - https://code.google.com/p/android-developer-preview/issues/detail?id=3150
+	if runtime.GOOS == "android" {
+		t.Skip("skipping on android, hardlinks not supported")
+	}
 	defer chtmpdir(t)()
 	from, to := "hardlinktestfrom", "hardlinktestto"
 	Remove(from) // Just in case.
@@ -767,9 +773,6 @@ func TestRename(t *testing.T) {
 }
 
 func TestRenameOverwriteDest(t *testing.T) {
-	if runtime.GOOS == "plan9" {
-		t.Skip("skipping on plan9")
-	}
 	defer chtmpdir(t)()
 	from, to := "renamefrom", "renameto"
 	// Just in case.

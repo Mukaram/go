@@ -687,18 +687,6 @@ OpSwitch:
 				n.Left = l
 				n.Right = r
 			}
-		} else if n.Op == OANDAND || n.Op == OOROR {
-			if l.Type == r.Type {
-				t = l.Type
-			} else if l.Type == idealbool {
-				t = r.Type
-			} else if r.Type == idealbool {
-				t = l.Type
-			}
-		} else
-		// non-comparison operators on ideal bools should make them lose their ideal-ness
-		if t == idealbool {
-			t = Types[TBOOL]
 		}
 
 		if et == TSTRING {
@@ -1751,7 +1739,7 @@ OpSwitch:
 
 		switch n.Op {
 		case OCONVNOP:
-			if n.Left.Op == OLITERAL && n.Type != Types[TBOOL] {
+			if n.Left.Op == OLITERAL {
 				r := Nod(OXXX, nil, nil)
 				n.Op = OCONV
 				n.Orig = r
@@ -2035,7 +2023,8 @@ OpSwitch:
 		OEMPTY,
 		OGOTO,
 		OXFALL,
-		OVARKILL:
+		OVARKILL,
+		OVARLIVE:
 		ok |= Etop
 		break OpSwitch
 
@@ -2971,9 +2960,8 @@ func typecheckcomplit(np **Node) {
 		}
 		length := int64(0)
 		i := 0
-		var l *Node
 		for ll := n.List; ll != nil; ll = ll.Next {
-			l = ll.N
+			l := ll.N
 			setlineno(l)
 			if l.Op != OKEY {
 				l = Nod(OKEY, Nodintconst(int64(i)), l)
@@ -2986,7 +2974,7 @@ func typecheckcomplit(np **Node) {
 			evconst(l.Left)
 			i = nonnegconst(l.Left)
 			if i < 0 && l.Left.Diag == 0 {
-				Yyerror("array index must be non-negative integer constant")
+				Yyerror("index must be non-negative integer constant")
 				l.Left.Diag = 1
 				i = -(1 << 30) // stay negative for a while
 			}
@@ -3008,7 +2996,7 @@ func typecheckcomplit(np **Node) {
 			pushtype(r, t.Type)
 			typecheck(&r, Erv)
 			defaultlit(&r, t.Type)
-			l.Right = assignconv(r, t.Type, "array element")
+			l.Right = assignconv(r, t.Type, "array or slice literal")
 		}
 
 		if t.Bound == -100 {
@@ -3442,7 +3430,7 @@ func typecheckfunc(n *Node) {
 	n.Type = t
 	t.Nname = n.Func.Nname
 	rcvr := getthisx(t).Type
-	if rcvr != nil && n.Func.Shortname != nil && !isblank(n.Func.Shortname) {
+	if rcvr != nil && n.Func.Shortname != nil {
 		addmethod(n.Func.Shortname.Sym, t, true, n.Func.Nname.Nointerface)
 	}
 

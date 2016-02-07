@@ -31,7 +31,7 @@ import (
 
 // Do not instrument the following packages at all,
 // at best instrumentation would cause infinite recursion.
-var omit_pkgs = []string{"runtime/internal/atomic", "runtime", "runtime/race", "runtime/msan"}
+var omit_pkgs = []string{"runtime/internal/atomic", "runtime/internal/sys", "runtime", "runtime/race", "runtime/msan"}
 
 // Only insert racefuncenter/racefuncexit into the following packages.
 // Memory accesses in the packages are either uninteresting or will cause false positives.
@@ -143,7 +143,7 @@ func instrumentnode(np **Node, init **NodeList, wr int, skip int) {
 		goto ret
 
 		// can't matter
-	case OCFUNC, OVARKILL:
+	case OCFUNC, OVARKILL, OVARLIVE:
 		goto ret
 
 	case OBLOCK:
@@ -151,7 +151,7 @@ func instrumentnode(np **Node, init **NodeList, wr int, skip int) {
 		for l := n.List; l != nil; l = l.Next {
 			switch l.N.Op {
 			case OCALLFUNC, OCALLMETH, OCALLINTER:
-				instrumentnode(&l.N, &out, 0, 0)
+				instrumentnode(&l.N, &l.N.Ninit, 0, 0)
 				out = list(out, l.N)
 				// Scan past OAS nodes copying results off stack.
 				// Those must not be instrumented, because the

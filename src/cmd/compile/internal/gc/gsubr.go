@@ -83,7 +83,7 @@ func Gbranch(as int, t *Type, likely int) *obj.Prog {
 	p := Prog(as)
 	p.To.Type = obj.TYPE_BRANCH
 	p.To.Val = nil
-	if as != obj.AJMP && likely != 0 && Thearch.Thechar != '9' && Thearch.Thechar != '7' {
+	if as != obj.AJMP && likely != 0 && Thearch.Thechar != '9' && Thearch.Thechar != '7' && Thearch.Thechar != '0' {
 		p.From.Type = obj.TYPE_CONST
 		if likely > 0 {
 			p.From.Offset = 1
@@ -185,7 +185,7 @@ func fixautoused(p *obj.Prog) {
 			continue
 		}
 
-		if (p.As == obj.AVARDEF || p.As == obj.AVARKILL) && p.To.Node != nil && !((p.To.Node).(*Node)).Used {
+		if (p.As == obj.AVARDEF || p.As == obj.AVARKILL || p.As == obj.AVARLIVE) && p.To.Node != nil && !((p.To.Node).(*Node)).Used {
 			// Cannot remove VARDEF instruction, because - unlike TYPE handled above -
 			// VARDEFs are interspersed with other code, and a jump might be using the
 			// VARDEF as a target. Replace with a no-op instead. A later pass will remove
@@ -404,6 +404,17 @@ func Naddr(a *obj.Addr, n *Node) {
 
 		a.Sym = Linksym(s)
 
+	case ODOT:
+		// A special case to make write barriers more efficient.
+		// Taking the address of the first field of a named struct
+		// is the same as taking the address of the struct.
+		if n.Left.Type.Etype != TSTRUCT || n.Left.Type.Type.Sym != n.Right.Sym {
+			Debug['h'] = 1
+			Dump("naddr", n)
+			Fatalf("naddr: bad %v %v", Oconv(int(n.Op), 0), Ctxt.Dconv(a))
+		}
+		Naddr(a, n.Left)
+
 	case OLITERAL:
 		if Thearch.Thechar == '8' {
 			a.Width = 0
@@ -438,7 +449,7 @@ func Naddr(a *obj.Addr, n *Node) {
 	case OADDR:
 		Naddr(a, n.Left)
 		a.Etype = uint8(Tptr)
-		if Thearch.Thechar != '5' && Thearch.Thechar != '7' && Thearch.Thechar != '9' { // TODO(rsc): Do this even for arm, ppc64.
+		if Thearch.Thechar != '0' && Thearch.Thechar != '5' && Thearch.Thechar != '7' && Thearch.Thechar != '9' { // TODO(rsc): Do this even for arm, ppc64.
 			a.Width = int64(Widthptr)
 		}
 		if a.Type != obj.TYPE_MEM {

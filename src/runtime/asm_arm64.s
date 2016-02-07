@@ -586,7 +586,13 @@ nocgo:
 	// lots of space, but the linker doesn't know. Hide the call from
 	// the linker analysis by using an indirect call.
 	CMP	$0, g
-	BNE	havem
+	BEQ	needm
+
+	MOVD	g_m(g), R8
+	MOVD	R8, savedm-8(SP)
+	B	havem
+
+needm:
 	MOVD	g, savedm-8(SP) // g is zero, so is m.
 	MOVD	$runtime·needm(SB), R0
 	BL	(R0)
@@ -608,8 +614,6 @@ nocgo:
 	MOVD	R0, (g_sched+gobuf_sp)(R3)
 
 havem:
-	MOVD	g_m(g), R8
-	MOVD	R8, savedm-8(SP)
 	// Now there's a valid m, and we're running on its m->g0.
 	// Save current m->g0->sched.sp on stack and then set it to SP.
 	// Save current sp in m->g0->sched.sp in preparation for
@@ -996,4 +1000,9 @@ TEXT runtime·addmoduledata(SB),NOSPLIT,$0-0
 	MOVD	R0, runtime·lastmoduledatap(SB)
 	MOVD	8(RSP), R27
 	ADD	$0x10, RSP
+	RET
+
+TEXT ·checkASM(SB),NOSPLIT,$0-1
+	MOVW	$1, R3
+	MOVB	R3, ret+0(FP)
 	RET

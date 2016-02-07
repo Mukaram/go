@@ -259,7 +259,6 @@ func convlit1(np **Node, t *Type, explicit bool) {
 				n.SetVal(toint(n.Val()))
 				fallthrough
 
-				// flowthrough
 			case CTINT:
 				overflow(n.Val(), t)
 			}
@@ -272,7 +271,6 @@ func convlit1(np **Node, t *Type, explicit bool) {
 				n.SetVal(toflt(n.Val()))
 				fallthrough
 
-				// flowthrough
 			case CTFLT:
 				n.SetVal(Val{truncfltlit(n.Val().U.(*Mpflt), t)})
 			}
@@ -283,6 +281,7 @@ func convlit1(np **Node, t *Type, explicit bool) {
 
 			case CTFLT, CTINT, CTRUNE:
 				n.SetVal(tocplx(n.Val()))
+				fallthrough
 
 			case CTCPLX:
 				overflow(n.Val(), t)
@@ -380,8 +379,13 @@ func toint(v Val) Val {
 
 	case CTFLT:
 		i := new(Mpint)
-		if mpmovefltfix(i, v.U.(*Mpflt)) < 0 {
-			Yyerror("constant %v truncated to integer", Fconv(v.U.(*Mpflt), obj.FmtSharp))
+		if f := v.U.(*Mpflt); mpmovefltfix(i, f) < 0 {
+			msg := "constant %v truncated to integer"
+			// provide better error message if mpmovefltfix failed because f was too large
+			if f.Val.IsInt() {
+				msg = "constant %v overflows integer"
+			}
+			Yyerror(msg, Fconv(f, obj.FmtSharp))
 		}
 		v.U = i
 
@@ -630,6 +634,7 @@ func evconst(n *Node) {
 	var wr int
 	var v Val
 	var norig *Node
+	var nn *Node
 	if nr == nil {
 		// copy numeric value to avoid modifying
 		// nl, in case someone still refers to it (e.g. iota).
@@ -660,7 +665,8 @@ func evconst(n *Node) {
 		case OCONV_ | CTINT_,
 			OCONV_ | CTRUNE_,
 			OCONV_ | CTFLT_,
-			OCONV_ | CTSTR_:
+			OCONV_ | CTSTR_,
+			OCONV_ | CTBOOL_:
 			convlit1(&nl, n.Type, true)
 
 			v = nl.Val()
@@ -1110,15 +1116,21 @@ ret:
 	return
 
 settrue:
-	norig = saveorig(n)
-	*n = *Nodbool(true)
-	n.Orig = norig
+	nn = Nodbool(true)
+	nn.Orig = saveorig(n)
+	if !iscmp[n.Op] {
+		nn.Type = nl.Type
+	}
+	*n = *nn
 	return
 
 setfalse:
-	norig = saveorig(n)
-	*n = *Nodbool(false)
-	n.Orig = norig
+	nn = Nodbool(false)
+	nn.Orig = saveorig(n)
+	if !iscmp[n.Op] {
+		nn.Type = nl.Type
+	}
+	*n = *nn
 	return
 
 illegal:
@@ -1306,20 +1318,28 @@ func defaultlit(np **Node, t *Type) {
 	return
 
 num:
+	// Note: n.Val().Ctype() can be CTxxx (not a constant) here
+	// in the case of an untyped non-constant value, like 1<<i.
+	v1 := n.Val()
 	if t != nil {
 		if Isint[t.Etype] {
 			t1 = t
-			n.SetVal(toint(n.Val()))
+			v1 = toint(n.Val())
 		} else if Isfloat[t.Etype] {
 			t1 = t
-			n.SetVal(toflt(n.Val()))
+			v1 = toflt(n.Val())
 		} else if Iscomplex[t.Etype] {
 			t1 = t
-			n.SetVal(tocplx(n.Val()))
+			v1 = tocplx(n.Val())
+		}
+		if n.Val().Ctype() != CTxxx {
+			n.SetVal(v1)
 		}
 	}
 
-	overflow(n.Val(), t1)
+	if n.Val().Ctype() != CTxxx {
+		overflow(n.Val(), t1)
+	}
 	Convlit(np, t1)
 	lineno = int32(lno)
 	return

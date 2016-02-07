@@ -22,9 +22,11 @@ const (
 	_CLOCK_MONOTONIC = 3
 )
 
+type sigset uint32
+
 const (
-	sigset_none = uint32(0)
-	sigset_all  = ^uint32(0)
+	sigset_none = sigset(0)
+	sigset_all  = ^sigset(0)
 )
 
 // From OpenBSD's <sys/sysctl.h>
@@ -47,8 +49,7 @@ func getncpu() int32 {
 }
 
 //go:nosplit
-func semacreate() uintptr {
-	return 1
+func semacreate(mp *m) {
 }
 
 //go:nosplit
@@ -105,10 +106,8 @@ func semawakeup(mp *m) {
 //go:nowritebarrier
 func newosproc(mp *m, stk unsafe.Pointer) {
 	if false {
-		print("newosproc stk=", stk, " m=", mp, " g=", mp.g0, " id=", mp.id, "/", int32(mp.tls[0]), " ostk=", &mp, "\n")
+		print("newosproc stk=", stk, " m=", mp, " g=", mp.g0, " id=", mp.id, " ostk=", &mp, "\n")
 	}
-
-	mp.tls[0] = uintptr(mp.id) // so 386 asm can find it
 
 	param := tforkt{
 		tf_tcb:   unsafe.Pointer(&mp.tls[0]),
@@ -151,12 +150,19 @@ func mpreinit(mp *m) {
 	mp.gsignal.m = mp
 }
 
+//go:nosplit
 func msigsave(mp *m) {
-	smask := (*uint32)(unsafe.Pointer(&mp.sigmask))
-	if unsafe.Sizeof(*smask) > unsafe.Sizeof(mp.sigmask) {
-		throw("insufficient storage for signal mask")
-	}
-	*smask = sigprocmask(_SIG_BLOCK, 0)
+	mp.sigmask = sigprocmask(_SIG_BLOCK, 0)
+}
+
+//go:nosplit
+func msigrestore(sigmask sigset) {
+	sigprocmask(_SIG_SETMASK, sigmask)
+}
+
+//go:nosplit
+func sigblock() {
+	sigprocmask(_SIG_SETMASK, sigset_all)
 }
 
 // Called to initialize a new m (including the bootstrap m).
@@ -168,10 +174,24 @@ func minit() {
 	_g_.m.procid = uint64(*(*int32)(unsafe.Pointer(&_g_.m.procid)))
 
 	// Initialize signal handling
-	signalstack(&_g_.m.gsignal.stack)
+	var st stackt
+	sigaltstack(nil, &st)
+	if st.ss_flags&_SS_DISABLE != 0 {
+		signalstack(&_g_.m.gsignal.stack)
+		_g_.m.newSigstack = true
+	} else {
+		// Use existing signal stack.
+		stsp := uintptr(unsafe.Pointer(st.ss_sp))
+		_g_.m.gsignal.stack.lo = stsp
+		_g_.m.gsignal.stack.hi = stsp + st.ss_size
+		_g_.m.gsignal.stackguard0 = stsp + _StackGuard
+		_g_.m.gsignal.stackguard1 = stsp + _StackGuard
+		_g_.m.gsignal.stackAlloc = st.ss_size
+		_g_.m.newSigstack = false
+	}
 
 	// restore signal mask from m.sigmask and unblock essential signals
-	nmask := *(*uint32)(unsafe.Pointer(&_g_.m.sigmask))
+	nmask := _g_.m.sigmask
 	for i := range sigtable {
 		if sigtable[i].flags&_SigUnblock != 0 {
 			nmask &^= 1 << (uint32(i) - 1)
@@ -181,11 +201,11 @@ func minit() {
 }
 
 // Called from dropm to undo the effect of an minit.
+//go:nosplit
 func unminit() {
-	_g_ := getg()
-	smask := *(*uint32)(unsafe.Pointer(&_g_.m.sigmask))
-	sigprocmask(_SIG_SETMASK, smask)
-	signalstack(nil)
+	if getg().m.newSigstack {
+		signalstack(nil)
+	}
 }
 
 func memlimit() uintptr {
@@ -200,13 +220,15 @@ type sigactiont struct {
 	sa_flags     int32
 }
 
+//go:nosplit
+//go:nowritebarrierrec
 func setsig(i int32, fn uintptr, restart bool) {
 	var sa sigactiont
 	sa.sa_flags = _SA_SIGINFO | _SA_ONSTACK
 	if restart {
 		sa.sa_flags |= _SA_RESTART
 	}
-	sa.sa_mask = sigset_all
+	sa.sa_mask = uint32(sigset_all)
 	if fn == funcPC(sighandler) {
 		fn = funcPC(sigtramp)
 	}
@@ -214,10 +236,14 @@ func setsig(i int32, fn uintptr, restart bool) {
 	sigaction(i, &sa, nil)
 }
 
+//go:nosplit
+//go:nowritebarrierrec
 func setsigstack(i int32) {
 	throw("setsigstack")
 }
 
+//go:nosplit
+//go:nowritebarrierrec
 func getsig(i int32) uintptr {
 	var sa sigactiont
 	sigaction(i, nil, &sa)
@@ -227,6 +253,7 @@ func getsig(i int32) uintptr {
 	return sa.sa_sigaction
 }
 
+//go:nosplit
 func signalstack(s *stack) {
 	var st stackt
 	if s == nil {
@@ -239,11 +266,13 @@ func signalstack(s *stack) {
 	sigaltstack(&st, nil)
 }
 
+//go:nosplit
+//go:nowritebarrierrec
 func updatesigmask(m sigmask) {
-	sigprocmask(_SIG_SETMASK, m[0])
+	sigprocmask(_SIG_SETMASK, sigset(m[0]))
 }
 
 func unblocksig(sig int32) {
-	mask := uint32(1) << (uint32(sig) - 1)
+	mask := sigset(1) << (uint32(sig) - 1)
 	sigprocmask(_SIG_UNBLOCK, mask)
 }

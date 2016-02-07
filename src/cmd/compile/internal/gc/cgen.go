@@ -6,6 +6,7 @@ package gc
 
 import (
 	"cmd/internal/obj"
+	"cmd/internal/obj/ppc64"
 	"fmt"
 )
 
@@ -251,7 +252,7 @@ func cgen_wb(n, res *Node, wb bool) {
 		return
 	}
 
-	if Ctxt.Arch.Thechar == '7' || Ctxt.Arch.Thechar == '9' {
+	if Ctxt.Arch.Thechar == '0' || Ctxt.Arch.Thechar == '7' || Ctxt.Arch.Thechar == '9' {
 		// if both are addressable, move
 		if n.Addable {
 			if n.Op == OREGISTER || res.Op == OREGISTER {
@@ -751,14 +752,14 @@ abop: // asymmetric binary
 		Regalloc(&n1, nl.Type, res)
 		Cgen(nl, &n1)
 
-		if Smallintconst(nr) && Ctxt.Arch.Thechar != '5' && Ctxt.Arch.Thechar != '7' && Ctxt.Arch.Thechar != '9' { // TODO(rsc): Check opcode for arm
+		if Smallintconst(nr) && Ctxt.Arch.Thechar != '0' && Ctxt.Arch.Thechar != '5' && Ctxt.Arch.Thechar != '7' && Ctxt.Arch.Thechar != '9' { // TODO(rsc): Check opcode for arm
 			n2 = *nr
 		} else {
 			Regalloc(&n2, nr.Type, nil)
 			Cgen(nr, &n2)
 		}
 	} else {
-		if Smallintconst(nr) && Ctxt.Arch.Thechar != '5' && Ctxt.Arch.Thechar != '7' && Ctxt.Arch.Thechar != '9' { // TODO(rsc): Check opcode for arm
+		if Smallintconst(nr) && Ctxt.Arch.Thechar != '0' && Ctxt.Arch.Thechar != '5' && Ctxt.Arch.Thechar != '7' && Ctxt.Arch.Thechar != '9' { // TODO(rsc): Check opcode for arm
 			n2 = *nr
 		} else {
 			Regalloc(&n2, nr.Type, res)
@@ -800,7 +801,9 @@ func cgen_wbptr(n, res *Node) {
 		Cgenr(n, &src, nil)
 	}
 
-	wbEnabled := syslook("writeBarrierEnabled", 0)
+	wbVar := syslook("writeBarrier", 0)
+	wbEnabled := Nod(ODOT, wbVar, newname(wbVar.Type.Type.Sym))
+	wbEnabled = typecheck(&wbEnabled, Erv)
 	pbr := Thearch.Ginscmp(ONE, Types[TUINT8], wbEnabled, Nodintconst(0), -1)
 	Thearch.Gins(Thearch.Optoas(OAS, Types[Tptr]), &src, &dst)
 	pjmp := Gbranch(obj.AJMP, nil, 0)
@@ -1829,8 +1832,8 @@ func bgenx(n, res *Node, wantTrue bool, likely int, to *obj.Prog) {
 			// but they don't support direct generation of a bool value yet.
 			// We can fix that as we go.
 			switch Ctxt.Arch.Thechar {
-			case '5', '7', '9':
-				Fatalf("genval 5g, 7g, 9g ONAMES not fully implemented")
+			case '0', '5', '7', '9':
+				Fatalf("genval 0g, 5g, 7g, 9g ONAMES not fully implemented")
 			}
 			Cgen(n, res)
 			if !wantTrue {
@@ -1839,7 +1842,7 @@ func bgenx(n, res *Node, wantTrue bool, likely int, to *obj.Prog) {
 			return
 		}
 
-		if n.Addable && Ctxt.Arch.Thechar != '5' && Ctxt.Arch.Thechar != '7' && Ctxt.Arch.Thechar != '9' {
+		if n.Addable && Ctxt.Arch.Thechar != '0' && Ctxt.Arch.Thechar != '5' && Ctxt.Arch.Thechar != '7' && Ctxt.Arch.Thechar != '9' {
 			// no need for a temporary
 			bgenNonZero(n, nil, wantTrue, likely, to)
 			return
@@ -2023,7 +2026,7 @@ func bgenx(n, res *Node, wantTrue bool, likely int, to *obj.Prog) {
 		Cgen(nl, &n1)
 		nl = &n1
 
-		if Smallintconst(nr) && Ctxt.Arch.Thechar != '9' {
+		if Smallintconst(nr) && Ctxt.Arch.Thechar != '0' && Ctxt.Arch.Thechar != '9' {
 			Thearch.Gins(Thearch.Optoas(OCMP, nr.Type), nl, nr)
 			bins(nr.Type, res, op, likely, to)
 			return
@@ -2046,6 +2049,13 @@ func bgenx(n, res *Node, wantTrue bool, likely int, to *obj.Prog) {
 	if Ctxt.Arch.Thechar == '6' && Isfloat[nl.Type.Etype] && (op == OGT || op == OGE) {
 		l, r = r, l
 		op = Brrev(op)
+	}
+
+	// MIPS does not have CMP instruction
+	if Ctxt.Arch.Thechar == '0' {
+		p := Thearch.Ginscmp(op, nr.Type, l, r, likely)
+		Patch(p, to)
+		return
 	}
 
 	// Do the comparison.
@@ -2133,6 +2143,15 @@ func bgenNonZero(n, res *Node, wantTrue bool, likely int, to *obj.Prog) {
 	if !wantTrue {
 		op = OEQ
 	}
+
+	// MIPS does not have CMP instruction
+	if Thearch.Thechar == '0' {
+		p := Gbranch(Thearch.Optoas(op, n.Type), n.Type, likely)
+		Naddr(&p.From, n)
+		Patch(p, to)
+		return
+	}
+
 	var zero Node
 	Nodconst(&zero, n.Type, 0)
 	Thearch.Gins(Thearch.Optoas(OCMP, n.Type), n, &zero)
@@ -2323,15 +2342,39 @@ func Ginscall(f *Node, proc int) {
 		-1: // normal call but no return
 		if f.Op == ONAME && f.Class == PFUNC {
 			if f == Deferreturn {
-				// Deferred calls will appear to be returning to
-				// the CALL deferreturn(SB) that we are about to emit.
-				// However, the stack trace code will show the line
-				// of the instruction byte before the return PC.
-				// To avoid that being an unrelated instruction,
-				// insert an actual hardware NOP that will have the right line number.
-				// This is different from obj.ANOP, which is a virtual no-op
-				// that doesn't make it into the instruction stream.
+				// Deferred calls will appear to be returning to the CALL
+				// deferreturn(SB) that we are about to emit. However, the
+				// stack scanning code will think that the instruction
+				// before the CALL is executing. To avoid the scanning
+				// code making bad assumptions (both cosmetic such as
+				// showing the wrong line number and fatal, such as being
+				// confused over whether a stack slot contains a pointer
+				// or a scalar) insert an actual hardware NOP that will
+				// have the right line number. This is different from
+				// obj.ANOP, which is a virtual no-op that doesn't make it
+				// into the instruction stream.
 				Thearch.Ginsnop()
+
+				if Thearch.Thechar == '9' {
+					// On ppc64, when compiling Go into position
+					// independent code on ppc64le we insert an
+					// instruction to reload the TOC pointer from the
+					// stack as well. See the long comment near
+					// jmpdefer in runtime/asm_ppc64.s for why.
+					// If the MOVD is not needed, insert a hardware NOP
+					// so that the same number of instructions are used
+					// on ppc64 in both shared and non-shared modes.
+					if Ctxt.Flag_shared != 0 {
+						p := Thearch.Gins(ppc64.AMOVD, nil, nil)
+						p.From.Type = obj.TYPE_MEM
+						p.From.Offset = 24
+						p.From.Reg = ppc64.REGSP
+						p.To.Type = obj.TYPE_REG
+						p.To.Reg = ppc64.REG_R2
+					} else {
+						Thearch.Ginsnop()
+					}
+				}
 			}
 
 			p := Thearch.Gins(obj.ACALL, nil, f)
@@ -2597,7 +2640,7 @@ func cgen_div(op Op, nl *Node, nr *Node, res *Node) {
 	// in peep and optoas in order to enable this.
 	// TODO(rsc): ppc64 needs to support the relevant instructions
 	// in peep and optoas in order to enable this.
-	if nr.Op != OLITERAL || Ctxt.Arch.Thechar == '7' || Ctxt.Arch.Thechar == '9' {
+	if nr.Op != OLITERAL || Ctxt.Arch.Thechar == '0' || Ctxt.Arch.Thechar == '7' || Ctxt.Arch.Thechar == '9' {
 		goto longdiv
 	}
 	w = int(nl.Type.Width * 8)

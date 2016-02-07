@@ -8,6 +8,7 @@ package httputil
 
 import (
 	"bufio"
+	"bytes"
 	"io"
 	"io/ioutil"
 	"log"
@@ -44,9 +45,13 @@ func TestReverseProxy(t *testing.T) {
 		if c := r.Header.Get("Upgrade"); c != "" {
 			t.Errorf("handler got Upgrade header value %q", c)
 		}
+		if c := r.Header.Get("Proxy-Connection"); c != "" {
+			t.Errorf("handler got Proxy-Connection header value %q", c)
+		}
 		if g, e := r.Host, "some-name"; g != e {
 			t.Errorf("backend got Host header %q, want %q", g, e)
 		}
+		w.Header().Set("Trailers", "not a special header field name")
 		w.Header().Set("Trailer", "X-Trailer")
 		w.Header().Set("X-Foo", "bar")
 		w.Header().Set("Upgrade", "foo")
@@ -70,6 +75,7 @@ func TestReverseProxy(t *testing.T) {
 	getReq, _ := http.NewRequest("GET", frontend.URL, nil)
 	getReq.Host = "some-name"
 	getReq.Header.Set("Connection", "close")
+	getReq.Header.Set("Proxy-Connection", "should be deleted")
 	getReq.Header.Set("Upgrade", "foo")
 	getReq.Close = true
 	res, err := http.DefaultClient.Do(getReq)
@@ -84,6 +90,9 @@ func TestReverseProxy(t *testing.T) {
 	}
 	if c := res.Header.Get(fakeHopHeader); c != "" {
 		t.Errorf("got %s header value %q", fakeHopHeader, c)
+	}
+	if g, e := res.Header.Get("Trailers"), "not a special header field name"; g != e {
+		t.Errorf("header Trailers = %q; want %q", g, e)
 	}
 	if g, e := len(res.Header["X-Multi-Value"]), 2; g != e {
 		t.Errorf("got %d X-Multi-Value header values; expected %d", g, e)
@@ -104,7 +113,6 @@ func TestReverseProxy(t *testing.T) {
 	if g, e := res.Trailer.Get("X-Trailer"), "trailer_value"; g != e {
 		t.Errorf("Trailer(X-Trailer) = %q ; want %q", g, e)
 	}
-
 }
 
 func TestXForwardedFor(t *testing.T) {
@@ -382,5 +390,45 @@ func TestReverseProxyGetPutBuffer(t *testing.T) {
 	defer mu.Unlock()
 	if !reflect.DeepEqual(log, wantLog) {
 		t.Errorf("Log events = %q; want %q", log, wantLog)
+	}
+}
+
+func TestReverseProxy_Post(t *testing.T) {
+	const backendResponse = "I am the backend"
+	const backendStatus = 200
+	var requestBody = bytes.Repeat([]byte("a"), 1<<20)
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		slurp, err := ioutil.ReadAll(r.Body)
+		if err != nil {
+			t.Errorf("Backend body read = %v", err)
+		}
+		if len(slurp) != len(requestBody) {
+			t.Errorf("Backend read %d request body bytes; want %d", len(slurp), len(requestBody))
+		}
+		if !bytes.Equal(slurp, requestBody) {
+			t.Error("Backend read wrong request body.") // 1MB; omitting details
+		}
+		w.Write([]byte(backendResponse))
+	}))
+	defer backend.Close()
+	backendURL, err := url.Parse(backend.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	proxyHandler := NewSingleHostReverseProxy(backendURL)
+	frontend := httptest.NewServer(proxyHandler)
+	defer frontend.Close()
+
+	postReq, _ := http.NewRequest("POST", frontend.URL, bytes.NewReader(requestBody))
+	res, err := http.DefaultClient.Do(postReq)
+	if err != nil {
+		t.Fatalf("Do: %v", err)
+	}
+	if g, e := res.StatusCode, backendStatus; g != e {
+		t.Errorf("got res.StatusCode %d; expected %d", g, e)
+	}
+	bodyBytes, _ := ioutil.ReadAll(res.Body)
+	if g, e := string(bodyBytes), backendResponse; g != e {
+		t.Errorf("got body %q; expected %q", g, e)
 	}
 }

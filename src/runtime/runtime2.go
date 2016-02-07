@@ -6,6 +6,7 @@ package runtime
 
 import (
 	"runtime/internal/atomic"
+	"runtime/internal/sys"
 	"unsafe"
 )
 
@@ -47,14 +48,6 @@ const (
 	_Pgcstop
 	_Pdead
 )
-
-// The next line makes 'go generate' write the zgen_*.go files with
-// per-OS and per-arch information, including constants
-// named goos_$GOOS and goarch_$GOARCH for every
-// known GOOS and GOARCH. The constant is 1 on the
-// current system, 0 otherwise; multiplying by them is
-// useful for defining GOOS- or GOARCH-specific constants.
-//go:generate go run gengoos.go
 
 type mutex struct {
 	// Futex-based impl treats it as uint32 key,
@@ -129,20 +122,31 @@ func efaceOf(ep *interface{}) *eface {
 // alternate arena. Using guintptr doesn't make that problem any worse.
 type guintptr uintptr
 
-func (gp guintptr) ptr() *g   { return (*g)(unsafe.Pointer(gp)) }
+//go:nosplit
+func (gp guintptr) ptr() *g { return (*g)(unsafe.Pointer(gp)) }
+
+//go:nosplit
 func (gp *guintptr) set(g *g) { *gp = guintptr(unsafe.Pointer(g)) }
+
+//go:nosplit
 func (gp *guintptr) cas(old, new guintptr) bool {
 	return atomic.Casuintptr((*uintptr)(unsafe.Pointer(gp)), uintptr(old), uintptr(new))
 }
 
 type puintptr uintptr
 
-func (pp puintptr) ptr() *p   { return (*p)(unsafe.Pointer(pp)) }
+//go:nosplit
+func (pp puintptr) ptr() *p { return (*p)(unsafe.Pointer(pp)) }
+
+//go:nosplit
 func (pp *puintptr) set(p *p) { *pp = puintptr(unsafe.Pointer(p)) }
 
 type muintptr uintptr
 
-func (mp muintptr) ptr() *m   { return (*m)(unsafe.Pointer(mp)) }
+//go:nosplit
+func (mp muintptr) ptr() *m { return (*m)(unsafe.Pointer(mp)) }
+
+//go:nosplit
 func (mp *muintptr) set(m *m) { *mp = muintptr(unsafe.Pointer(m)) }
 
 type gobuf struct {
@@ -151,7 +155,7 @@ type gobuf struct {
 	pc   uintptr
 	g    guintptr
 	ctxt unsafe.Pointer // this has to be a pointer so that gc scans it
-	ret  uintreg
+	ret  sys.Uintreg
 	lr   uintptr
 	bp   uintptr // for GOEXPERIMENT=framepointer
 }
@@ -229,7 +233,7 @@ type g struct {
 	sched          gobuf
 	syscallsp      uintptr        // if status==Gsyscall, syscallsp = sched.sp to use during gc
 	syscallpc      uintptr        // if status==Gsyscall, syscallpc = sched.pc to use during gc
-	stkbar         []stkbar       // stack barriers, from low to high
+	stkbar         []stkbar       // stack barriers, from low to high (see top of mstkbar.go)
 	stkbarPos      uintptr        // index of lowest stack barrier not hit
 	stktopsp       uintptr        // expected sp at top of stack, to check in traceback
 	param          unsafe.Pointer // passed parameter on wakeup
@@ -280,8 +284,8 @@ type m struct {
 	// Fields not known to debuggers.
 	procid        uint64     // for debuggers, but offset not hard-coded
 	gsignal       *g         // signal-handling g
-	sigmask       [4]uintptr // storage for saved signal mask
-	tls           [4]uintptr // thread-local storage (for x86 extern register)
+	sigmask       sigset     // storage for saved signal mask
+	tls           [6]uintptr // thread-local storage (for x86 extern register)
 	mstartfn      func()
 	curg          *g       // current running goroutine
 	caughtsig     guintptr // goroutine running during fatal signal
@@ -299,6 +303,7 @@ type m struct {
 	spinning      bool // m is out of work and is actively looking for work
 	blocked       bool // m is blocked on a note
 	inwb          bool // m is executing a write barrier
+	newSigstack   bool // minit on C thread called sigaltstack
 	printlock     int8
 	fastrand      uint32
 	ncgocall      uint64 // number of cgo calls in total
@@ -315,9 +320,6 @@ type m struct {
 	fflag         uint32      // floating point compare flags
 	locked        uint32      // tracking for lockosthread
 	nextwaitm     uintptr     // next m waiting for lock
-	waitsema      uintptr     // semaphore for parking on locks
-	waitsemacount uint32
-	waitsemalock  uint32
 	gcstats       gcstats
 	needextram    bool
 	traceback     uint8
@@ -386,7 +388,7 @@ type p struct {
 
 	// Per-P GC state
 	gcAssistTime     int64 // Nanoseconds in assistAlloc
-	gcBgMarkWorker   *g
+	gcBgMarkWorker   guintptr
 	gcMarkWorkerMode gcMarkWorkerMode
 
 	// gcw is this P's GC work buffer cache. The work buffer is
@@ -406,9 +408,11 @@ const (
 )
 
 type schedt struct {
-	lock mutex
+	// accessed atomically. keep at top to ensure alignment on 32-bit systems.
+	goidgen  uint64
+	lastpoll uint64
 
-	goidgen uint64
+	lock mutex
 
 	midle        muintptr // idle m's waiting for work
 	nmidle       int32    // number of idle m's waiting for work
@@ -416,9 +420,11 @@ type schedt struct {
 	mcount       int32    // number of m's that have been created
 	maxmcount    int32    // maximum number of m's allowed (or die)
 
+	ngsys uint32 // number of system goroutines; updated atomically
+
 	pidle      puintptr // idle p's
 	npidle     uint32
-	nmspinning uint32 // limited to [0, 2^31-1]
+	nmspinning uint32 // See "Worker thread parking/unparking" comment in proc.go.
 
 	// Global runnable queue.
 	runqhead guintptr
@@ -443,7 +449,6 @@ type schedt struct {
 	stopnote   note
 	sysmonwait uint32
 	sysmonnote note
-	lastpoll   uint64
 
 	// safepointFn should be called on each P at the next GC
 	// safepoint if p.runSafePointFn is set.
@@ -481,7 +486,6 @@ const (
 	_SigPanic                // if the signal is from the kernel, panic
 	_SigDefault              // if the signal isn't explicitly requested, don't monitor it
 	_SigHandling             // our signal handler is registered
-	_SigIgnored              // the signal was ignored before we registered for it
 	_SigGoExit               // cause all runtime procs to exit (only used on Plan 9).
 	_SigSetStack             // add SA_ONSTACK to libc handler
 	_SigUnblock              // unblocked in minit
@@ -496,7 +500,7 @@ type _func struct {
 	nameoff int32   // function name
 
 	args int32 // in/out args size
-	_    int32 // Previously: legacy frame size. TODO: Remove this.
+	_    int32 // previously legacy frame size; kept for layout compatibility
 
 	pcsp      int32
 	pcfile    int32
@@ -533,7 +537,7 @@ type forcegcstate struct {
  * known to compiler
  */
 const (
-	_Structrnd = regSize
+	_Structrnd = sys.RegSize
 )
 
 // startup_random_data holds random bytes initialized at startup.  These come from
@@ -553,7 +557,7 @@ func extendRandom(r []byte, n int) {
 			w = 16
 		}
 		h := memhash(unsafe.Pointer(&r[n-w]), uintptr(nanotime()), uintptr(w))
-		for i := 0; i < ptrSize && n < len(r); i++ {
+		for i := 0; i < sys.PtrSize && n < len(r); i++ {
 			r[n] = byte(h)
 			n++
 			h >>= 8

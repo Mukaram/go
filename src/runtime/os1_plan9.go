@@ -9,6 +9,8 @@ import (
 	"unsafe"
 )
 
+type sigset struct{}
+
 // Called to initialize a new m (including the bootstrap m).
 // Called on the parent thread (main thread in case of bootstrap), can allocate memory.
 func mpreinit(mp *m) {
@@ -22,6 +24,12 @@ func mpreinit(mp *m) {
 }
 
 func msigsave(mp *m) {
+}
+
+func msigrestore(sigmask sigset) {
+}
+
+func sigblock() {
 }
 
 // Called to initialize a new m (including the bootstrap m).
@@ -99,7 +107,7 @@ func getRandomData(r []byte) {
 func goenvs() {
 }
 
-func initsig() {
+func initsig(preinit bool) {
 }
 
 //go:nosplit
@@ -205,8 +213,7 @@ func newosproc(mp *m, stk unsafe.Pointer) {
 }
 
 //go:nosplit
-func semacreate() uintptr {
-	return 1
+func semacreate(mp *m) {
 }
 
 //go:nosplit
